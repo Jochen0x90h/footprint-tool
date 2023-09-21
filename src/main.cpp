@@ -22,14 +22,9 @@ constexpr double RECT = 0;
 
 struct Footprint {
 	enum class Type {
-		// single in-line package
-		SIP,
-
-		// dual in-line package
-		DIP,
-
-		// quad flat package
-		QFP
+		DETECT,
+		THROUGH_HOLE,
+		SMD,
 	};
 
 	enum class Numbering {
@@ -39,6 +34,17 @@ struct Footprint {
 	};
 
 	struct Pad {
+		enum class Type {
+			// single in-line package
+			SIP,
+
+			// dual in-line package
+			DIP,
+
+			// quad flat package
+			QFP
+		};
+
 		// position of pad or center of multiple pads
 		double2 position;
 
@@ -86,9 +92,22 @@ struct Footprint {
 	bool template_ = false;
 	std::string name;
 	std::string description;
+	Type type = Type::DETECT;
 	double3 body;
 	double2 margin;
 	std::vector<Pad> pads;
+
+	Type getType() const {
+		if (this->type == Footprint::Type::DETECT) {
+			// detect footprint type
+			for (auto &pad : this->pads) {
+				if (pad.size.positive() && pad.drill.positive())
+					return Type::THROUGH_HOLE;
+			}
+			return Type::SMD;
+		}
+		return this->type;
+	}
 };
 
 void read(json &j, const std::string &key, std::string &value) {
@@ -161,11 +180,11 @@ void readPad(json &j, Footprint::Pad &pad) {
 	// type
 	std::string type = j.value("type", std::string());
 	if (type == "sip")
-		pad.type = Footprint::Type::SIP;
+		pad.type = Footprint::Pad::Type::SIP;
 	else if (type == "dip")
-		pad.type = Footprint::Type::DIP;
+		pad.type = Footprint::Pad::Type::DIP;
 	else if (type == "qfp")
-		pad.type = Footprint::Type::QFP;
+		pad.type = Footprint::Pad::Type::QFP;
 
 	// pitch
 	read(j, "pitch", pad.pitch);
@@ -176,7 +195,7 @@ void readPad(json &j, Footprint::Pad &pad) {
 	// count
 	read(j, "count", pad.count);
 
-	// numbers
+	// first number
 	read(j, "number", pad.number);
 
 	// exclude numbers
@@ -204,6 +223,7 @@ void readFootprint(json &j, std::map<std::string, Footprint> &footprints, Footpr
 	std::string inherit = j.value("inherit", std::string());
 	if (footprints.contains(inherit)) {
 		footprint = footprints[inherit];
+		footprint.template_ = false;
 	}
 
 	// template
@@ -225,22 +245,20 @@ void readFootprint(json &j, std::map<std::string, Footprint> &footprints, Footpr
 		int size = jp.size();
 		footprint.pads.resize(size);
 		for (int i = 0; i < size; ++i) {
-			// read defaults
-			//readComponent(j, footprint.components[i]);
-
 			// read per-component values
 			readPad(jp.at(i), footprint.pads[i]);
 		}
 	} else {
+		// no pads
 		footprint.pads.clear();
-		/*// there must be at least one component
-		if (footprint.components.empty())
-			footprint.components.push_back(Footprint::Component());
-		int size = footprint.components.size();
-		for (int i = 0; i < size; ++i) {
-			readComponent(j, footprint.components[i]);
-		}*/
 	}
+
+	// type
+	std::string type = j.value("type", std::string());
+	if (type == "through hole")
+		footprint.type = Footprint::Type::THROUGH_HOLE;
+	else if (type == "smd")
+		footprint.type = Footprint::Type::SMD;
 }
 
 void readJson(const fs::path &path, std::map<std::string, Footprint> &footprints) {
@@ -450,6 +468,8 @@ void fabRectangle(std::ofstream &s, double2 center, double2 size) {
 void generateSip(std::ofstream &s, const Footprint::Pad &pad, clipperlib::Paths64 &clips) {
 	int count = pad.count;
 
+	double drillOffset = pad.distance.x;
+
 	// position of first pin
 	double2 position = pad.position + double2((pad.pitch * (count - 1)) * -0.5, 0);
 
@@ -458,7 +478,7 @@ void generateSip(std::ofstream &s, const Footprint::Pad &pad, clipperlib::Paths6
 		int number = pad.number + (pad.mirror ? count - 1 - i : i);
 
 		if (pad.hasNumber(number)) {
-			generatePad(s, number, ROUNDRECT, position, pad.size, pad.drill, {0, 0}, pad.clearance, pad.maskMargin);
+			generatePad(s, number, ROUNDRECT, position, pad.size, pad.drill, {0, drillOffset}, pad.clearance, pad.maskMargin);
 			addSilkscreenPad(clips, position, pad.size, pad.drill);
 		}
 		position.x += pad.pitch;
@@ -525,11 +545,9 @@ void generateQfp(std::ofstream &s, const Footprint::Pad &pad, clipperlib::Paths6
 
 }
 
-void generate(const fs::path &path, const std::string &name, const Footprint &footprint) {
-	// check if footprint is a template
-	if (footprint.template_)
-		return;
-
+bool generateFootprint(const fs::path &path, const std::string &name, const Footprint &footprint) {
+	auto bodySize =  footprint.body.xy();
+	bool haveBody = bodySize.positive();
 	double2 refPosition = {0, 0};
 	double2 valuePosition = {0, 0};
 	double maskMargin = 0;
@@ -539,19 +557,19 @@ void generate(const fs::path &path, const std::string &name, const Footprint &fo
 
 	// header
 	s << "(module " << name << " (layer F.Cu) (tedit 5EC043C1)" << std::endl;
+	s << "  (descr \"" << footprint.description << "\")" << std::endl;
+	s << "  (attr " << (footprint.getType() == Footprint::Type::THROUGH_HOLE ? "through_hole" : "smd") << ')' << std::endl;
+	if (haveBody)
+		s << "  (model \"" << name << ".wrl\" (at (xyz 0 0 0)) (scale (xyz 1 1 1)) (rotate (xyz 0 0 0)))" << std::endl;
 	s << "  (fp_text reference REF** (at " << refPosition << ") (layer F.SilkS) (effects (font (size 1 1) (thickness 0.15))))" << std::endl;
 	s << "  (fp_text value " << name << " (at " << valuePosition << ") (layer F.Fab) (effects (font (size 1 1) (thickness 0.15))))" << std::endl;
 	s << "  (solder_mask_margin " << maskMargin << ")" << std::endl;
 	s << "  (solder_paste_margin " << pasteMargin << ")" << std::endl;
-	s << "  (descr \"" << footprint.description << "\")" << std::endl;
-	//s << "  (model {model} (at (xyz 0 0 0)) (scale (xyz 1 1 1)) (rotate (xyz 0 0 0)))";
 
 	clipperlib::Clipper64 clipper;
 	clipperlib::Paths64 clips;
 
 	// body
-	auto bodySize =  footprint.body.xy();
-	bool haveBody = bodySize.x > 0 && bodySize.y > 0;
 	if (haveBody) {
 		double2 size = bodySize + footprint.margin * 2.0;
 		if (!footprint.pads.empty() && footprint.pads.front().mirror)
@@ -572,13 +590,13 @@ void generate(const fs::path &path, const std::string &name, const Footprint &fo
 	// components
 	for (auto &pad : footprint.pads) {
 		switch (pad.type) {
-		case Footprint::Type::SIP:
+		case Footprint::Pad::Type::SIP:
 			generateSip(s, pad, clips);
 			break;
-		case Footprint::Type::DIP:
+		case Footprint::Pad::Type::DIP:
 			generateDip(s, pad, clips);
 			break;
-		case Footprint::Type::QFP:
+		case Footprint::Pad::Type::QFP:
 			generateQfp(s, pad, clips);
 			break;
 		}
@@ -599,6 +617,49 @@ void generate(const fs::path &path, const std::string &name, const Footprint &fo
 	s << ")" << std::endl;
 
 	s.close();
+
+	return haveBody;
+}
+
+void generateVrml(const fs::path &path, const std::string &name, const Footprint &footprint) {
+	std::ofstream s((path / (name + ".wrl")).string());
+
+	double3 center(0, 0, footprint.body.z * (0.5 / 2.54));
+	double3 size = footprint.body * (0.5 / 2.54);
+
+	// header
+	s << R"vrml(#VRML V2.0 utf8
+Shape {
+	appearance Appearance {material DEF mat Material {
+		ambientIntensity 0.293
+		diffuseColor 0.148 0.145 0.145
+		specularColor 0.18 0.168 0.16
+		emissiveColor 0.0 0.0 0.0
+		transparency 0.0
+		shininess 0.35
+		}
+	}
+}
+Shape {
+	geometry IndexedFaceSet {
+		creaseAngle 0.50
+		coordIndex [3,0,2,-1,3,1,0,-1,6,5,7,-1,6,4,5,-1,1,4,0,-1,1,5,4,-1,7,2,6,-1,7,3,2,-1,2,4,6,-1,2,0,4,-1,7,1,3,-1,7,5,1]
+		coord Coordinate {point [)vrml";
+
+	for (int i = 0; i < 8; ++i) {
+		if (i != 0)
+			s << ',';
+		double3 p = center + size * double3(i & 1 ? 1.0 : -1.0, i & 2 ? 1.0 : -1.0, i & 4 ? 1.0 : -1.0);
+		s << p;
+	}
+
+s << R"vrml(]}
+	}
+	appearance Appearance {material USE mat}
+}
+)vrml";
+
+	s.close();
 }
 
 int main(int argc, const char **argv) {
@@ -613,9 +674,14 @@ int main(int argc, const char **argv) {
 
 	// generate footprints
 	for (const auto &[name, footprint] : footprints) {
+		// check if footprint is a template
+		if (footprint.template_)
+			continue;;
 		std::cout << name << std::endl;
 
-		generate(path.parent_path(), name, footprint);
+		auto dir = path.parent_path();
+		if (generateFootprint(dir, name, footprint))
+			generateVrml(dir, name, footprint);
 	}
 
 	return 0;

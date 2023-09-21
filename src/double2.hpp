@@ -13,15 +13,27 @@ struct double2 {
 	bool positive() const {return x > 0 && y > 0;}
 };
 
-double2 operator +(double2 a, double2 b) {
+inline double2 operator -(double2 a, double2 b) {
+	return {a.x - b.x, a.y - b.y};
+}
+
+inline double2 operator +(double2 a, double2 b) {
 	return {a.x + b.x, a.y + b.y};
 }
 
-double2 operator *(double2 a, double b) {
+inline double2 operator -(double2 a) {
+	return {-a.x, -a.y};
+}
+
+inline double2 operator *(double2 a, double b) {
 	return {a.x * b, a.y * b};
 }
 
-std::ostream &operator <<(std::ostream &s, double2 value) {
+inline double2 operator *(double2 a, double2 b) {
+	return {a.x * b.x, a.y * b.y};
+}
+
+inline std::ostream &operator <<(std::ostream &s, double2 value) {
 	s << value.x << ' ' << value.y;
 	return s;
 }

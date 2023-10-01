@@ -165,7 +165,7 @@ void readPad(json &j, Footprint::Pad &pad) {
 	read(j, "position", pad.position);
 
 	// size
-	read(j, "size", pad.size);
+	readRelaxed(j, "size", pad.size);
 
 	// drill
 	readRelaxed(j, "drill", pad.drill);
@@ -475,10 +475,23 @@ void generateSip(std::ofstream &s, const Footprint::Pad &pad, clipperlib::Paths6
 
 	// generate pins
 	for (int i = 0; i < count; ++i) {
-		int number = pad.number + (pad.mirror ? count - 1 - i : i);
+		//int number = pad.number + (pad.mirror ? count - 1 - i : i);
+		int index = pad.mirror ? count - 1 - i : i;
 
-		if (pad.hasNumber(number)) {
-			generatePad(s, number, ROUNDRECT, position, pad.size, pad.drill, {0, drillOffset}, pad.clearance, pad.maskMargin);
+		int n;
+		switch (pad.numbering) {
+		case Footprint::Numbering::CIRCULAR:
+		case Footprint::Numbering::ZIGZAG:
+			n = pad.number + index;
+			break;
+		case Footprint::Numbering::DOUBLE:
+			n = pad.number + index / 2;
+			break;
+		}
+
+
+		if (pad.hasNumber(n)) {
+			generatePad(s, n, ROUNDRECT, position, pad.size, pad.drill, {0, drillOffset}, pad.clearance, pad.maskMargin);
 			addSilkscreenPad(clips, position, pad.size, pad.drill);
 		}
 		position.x += pad.pitch;

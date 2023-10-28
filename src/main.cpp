@@ -33,6 +33,7 @@ struct Footprint {
 		DOUBLE
 	};
 
+	// pad or pad array
 	struct Pad {
 		enum class Type {
 			// single in-line package
@@ -92,9 +93,20 @@ struct Footprint {
 	bool template_ = false;
 	std::string name;
 	std::string description;
+
+	// through-hole or smd
 	Type type = Type::DETECT;
+
+	// body size, used for silkscreen, courtyard and 3D model
 	double3 body;
+
+	// additional courtyard margin
 	double2 margin;
+
+	// global position
+	double2 position;
+
+	// list of pads (pad arrays)
 	std::vector<Pad> pads;
 
 	Type getType() const {
@@ -238,7 +250,10 @@ void readFootprint(json &j, std::map<std::string, Footprint> &footprints, Footpr
 	// margin (enlarges silkscreen around body)
 	readRelaxed(j, "margin", footprint.margin);
 
-	// pads
+	// global position
+	read(j, "position", footprint.position);
+
+	// pads/pad arrays
 	if (j.contains("pads")) {
 		auto jp = j.at("pads");
 
@@ -465,13 +480,13 @@ void fabRectangle(std::ofstream &s, double2 center, double2 size) {
 	line(s, {x1, y2}, {x1, y}, silkscreenWidth, "F.Fab");
 }
 
-void generateSip(std::ofstream &s, const Footprint::Pad &pad, clipperlib::Paths64 &clips) {
+void generateSip(std::ofstream &s, double2 globalPosition, const Footprint::Pad &pad, clipperlib::Paths64 &clips) {
 	int count = pad.count;
 
 	double drillOffset = pad.distance.x;
 
 	// position of first pin
-	double2 position = pad.position + double2((pad.pitch * (count - 1)) * -0.5, 0);
+	double2 position = globalPosition + pad.position + double2((pad.pitch * (count - 1)) * -0.5, 0);
 
 	// generate pins
 	for (int i = 0; i < count; ++i) {
@@ -498,7 +513,7 @@ void generateSip(std::ofstream &s, const Footprint::Pad &pad, clipperlib::Paths6
 	}
 }
 
-void generateDip(std::ofstream &s, const Footprint::Pad &pad, clipperlib::Paths64 &clips) {
+void generateDip(std::ofstream &s, double2 globalPosition, const Footprint::Pad &pad, clipperlib::Paths64 &clips) {
 	int count = pad.count / 2;
 
 	double padDistance, drillOffset;
@@ -518,7 +533,7 @@ void generateDip(std::ofstream &s, const Footprint::Pad &pad, clipperlib::Paths6
 	}
 
 	// position of first pin of lower row
-	double2 position1 = pad.position + double2((pad.pitch * (count - 1)) * -0.5, padDistance * 0.5);
+	double2 position1 = globalPosition + pad.position + double2((pad.pitch * (count - 1)) * -0.5, padDistance * 0.5);
 
 	// generate pins
 	for (int i = 0; i < count; ++i) {
@@ -554,7 +569,7 @@ void generateDip(std::ofstream &s, const Footprint::Pad &pad, clipperlib::Paths6
 	}
 }
 
-void generateQfp(std::ofstream &s, const Footprint::Pad &pad, clipperlib::Paths64 &clips) {
+void generateQfp(std::ofstream &s, double2 globalPosition, const Footprint::Pad &pad, clipperlib::Paths64 &clips) {
 
 }
 
@@ -589,14 +604,14 @@ bool generateFootprint(const fs::path &path, const std::string &name, const Foot
 			size.x *= -1;
 
 		// courtyard
-		rectangle(s, {0, 0}, size, 0.05, "F.CrtYd");
+		rectangle(s, footprint.position, size, 0.05, "F.CrtYd");
 
 		// fabrication layer
-		fabRectangle(s, {0, 0}, size);
+		fabRectangle(s, footprint.position, size);
 
 		// add silkscreen rectangle
 		clipperlib::Paths64 rectangle;
-		addSilkscreenRectangle(rectangle, {0, 0}, size);
+		addSilkscreenRectangle(rectangle, footprint.position, size);
 		clipper.AddOpenSubject(rectangle);
 	}
 
@@ -604,13 +619,13 @@ bool generateFootprint(const fs::path &path, const std::string &name, const Foot
 	for (auto &pad : footprint.pads) {
 		switch (pad.type) {
 		case Footprint::Pad::Type::SIP:
-			generateSip(s, pad, clips);
+			generateSip(s, footprint.position, pad, clips);
 			break;
 		case Footprint::Pad::Type::DIP:
-			generateDip(s, pad, clips);
+			generateDip(s, footprint.position, pad, clips);
 			break;
 		case Footprint::Pad::Type::QFP:
-			generateQfp(s, pad, clips);
+			generateQfp(s, footprint.position, pad, clips);
 			break;
 		}
 	}

@@ -2,18 +2,21 @@ import os
 import json
 from pathlib import Path
 
+
+# configuration
 home = Path.home()
 vcpkg = Path(os.environ['VCPKG_ROOT'])
 generator = "Visual Studio 17 2022"
 triplet = "x64-windows-static"
 
+
+# template for cmake presets
 presets = {
 	"version": 3,
 	"configurePresets": [],
 	"buildPresets": [],
 	"testPresets": []
 }
-
 def addPreset(type, triplet, configuration):
 	presets[type].append(
 		{
@@ -23,8 +26,10 @@ def addPreset(type, triplet, configuration):
 		}
 	)
 
-# install dependencies and create cmake presets
+# install dependencies
 os.system(f"vcpkg install --triplet {triplet} --x-install-root vcpkg/{triplet}")
+
+# create cmake presets
 presets["configurePresets"].append(
 	{
 		"name": triplet,
@@ -36,7 +41,8 @@ presets["configurePresets"].append(
 			"X_VCPKG_APPLOCAL_DEPS_INSTALL": "ON",
 			"CMAKE_INSTALL_PREFIX": str(home / ".local")
 		},
-		"toolchainFile": str(vcpkg / "scripts/buildsystems/vcpkg.cmake")
+		"toolchainFile": str(vcpkg / "scripts/buildsystems/vcpkg.cmake"),
+		"binaryDir": f"build/{triplet}"
 	}
 )
 addPreset("buildPresets", triplet, "Debug")
@@ -49,5 +55,8 @@ file = open("CMakeUserPresets.json", "w")
 file.write(json.dumps(presets, indent=4))
 file.close()
 
-# install to ~/.local/bin
-os.system(f"cmake --build out/build/{triplet} --config Release --target install")
+# configure
+os.system(f"cmake --preset {triplet}")
+
+# build and install to ~/.local/bin
+os.system(f"cmake --build build/{triplet} --config Debug --target install")

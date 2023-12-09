@@ -1,4 +1,4 @@
-#include "clipperlib.hpp"
+#include "clipper2.hpp"
 #include "double3.hpp"
 #include <nlohmann/json.hpp>
 #include <iostream>
@@ -46,14 +46,23 @@ struct Footprint {
 			QFP
 		};
 
-		// position of pad or center of multiple pads
+		// global position of pad or center of multiple pads
 		double2 position;
 
 		// size of pad
 		double2 size;
 
+		// offset of pad relative to position
+		double2 offset;
+
+		// shape of pad
+		double shape = ROUNDRECT;
+
 		// size of drill
-		double2 drill;
+		double2 drillSize;
+
+		// offset of drill relative to position
+		double2 drillOffset;
 
 		// clearance
 		double clearance = 0;
@@ -61,7 +70,7 @@ struct Footprint {
 		// solder mask margin
 		double maskMargin = 0;
 
-		// package type
+		// package type for generating multiple pads
 		Type type = Type::SIP;
 
 		// pitch between pads
@@ -75,6 +84,9 @@ struct Footprint {
 
 		// pad number or number of first pad
 		int number = 1;
+
+		// pad number increment
+		int increment = 1;
 
 		// numbering scheme
 		Numbering numbering = Numbering::CIRCULAR;
@@ -103,6 +115,9 @@ struct Footprint {
 	// additional courtyard margin
 	double2 margin;
 
+	// generate silkscreen
+	bool silkscreen = true;
+
 	// global position
 	double2 position;
 
@@ -113,7 +128,7 @@ struct Footprint {
 		if (this->type == Footprint::Type::DETECT) {
 			// detect footprint type
 			for (auto &pad : this->pads) {
-				if (pad.size.positive() && pad.drill.positive())
+				if (pad.size.positive() && pad.drillSize.positive())
 					return Type::THROUGH_HOLE;
 			}
 			return Type::SMD;
@@ -179,8 +194,17 @@ void readPad(json &j, Footprint::Pad &pad) {
 	// size
 	readRelaxed(j, "size", pad.size);
 
-	// drill
-	readRelaxed(j, "drill", pad.drill);
+	// offset
+	readRelaxed(j, "offset", pad.offset);
+
+	// shape
+	read(j, "shape", pad.shape);
+
+	// drill size
+	readRelaxed(j, "drillSize", pad.drillSize);
+
+	// drill offset
+	readRelaxed(j, "drillOffset", pad.drillOffset);
 
 	// clearance
 	read(j, "clearance", pad.clearance);
@@ -204,11 +228,14 @@ void readPad(json &j, Footprint::Pad &pad) {
 	// distance
 	readRelaxed(j, "distance", pad.distance);
 
-	// count
+	// pad count
 	read(j, "count", pad.count);
 
-	// first number
+	// first pad number
 	read(j, "number", pad.number);
+
+	// pad number increment
+	read(j, "increment", pad.increment);
 
 	// exclude numbers
 	if (j.contains("exclude")) {
@@ -249,6 +276,8 @@ void readFootprint(json &j, std::map<std::string, Footprint> &footprints, Footpr
 
 	// margin (enlarges silkscreen around body)
 	readRelaxed(j, "margin", footprint.margin);
+
+	read(j, "silkscreen", footprint.silkscreen);
 
 	// global position
 	read(j, "position", footprint.position);
@@ -304,9 +333,9 @@ void readJson(const fs::path &path, std::map<std::string, Footprint> &footprints
 }
 
 // define a pad
-void generatePad(std::ofstream &s, int index, double shape, double2 position, double2 size, double2 drill, double2 drillOffset, double clearance, double maskMargin, const char *layers = nullptr) {
+void generatePad(std::ofstream &s, int index, double2 position, double2 size, double shape, double2 drillSize, double2 drillOffset, double clearance, double maskMargin, const char *layers = nullptr) {
 	bool hasPad = size.positive();
-	bool hasDrill = drill.positive();
+	bool hasDrill = drillSize.positive();
 
 	// pad
 	if (hasPad) {
@@ -315,7 +344,7 @@ void generatePad(std::ofstream &s, int index, double shape, double2 position, do
 	} else {
 		s << "  (pad \"\" np_thru_hole";
 		shape = CIRCLE;
-		size = drill;
+		size = drillSize;
 	}
 
 	// shape
@@ -336,11 +365,12 @@ void generatePad(std::ofstream &s, int index, double shape, double2 position, do
 
 	// drill
 	if (hasDrill) {
-		if (drill.x == drill.y)
-			s << " (drill " << drill.x;
+		s << " (drill ";
+		if (drillSize.x == drillSize.y)
+			s << drillSize.x;
 		else
-			s << " (drill oval " << drill;
-		if (drillOffset.x != 0 || drillOffset.y != 0)
+			s << "oval " << drillSize;
+		if (!drillOffset.zero())
 			s << " (offset " << drillOffset << ")";
 		s << ")";
 	}
@@ -378,7 +408,7 @@ constexpr double silkscreenWidth = 0.15;
 constexpr double silkscreenDistance = 0.1;
 constexpr double padClearance = 0.1;
 
-void addSilkscreenRectangle(clipperlib::Paths64 &paths, double2 center, double2 size) {
+void addSilkscreenRectangle(clipper2::Clipper64 &clipper, double2 center, double2 size) {
 	//size.x += silkscreenWidth + silkscreenDistance * 2;
 	//size.y += silkscreenWidth + silkscreenDistance * 2;
 	double x1 = center.x - size.x * 0.5;
@@ -390,26 +420,31 @@ void addSilkscreenRectangle(clipperlib::Paths64 &paths, double2 center, double2 
 	double x = x1 + (x2 > x1 ? d : -d);
 	double y = y1 + (y2 > y1 ? d : -d);
 
-	clipperlib::Path64 path;
-	path.push_back(toClipperPoint({x, y1}));
-	path.push_back(toClipperPoint({x2, y1}));
-	path.push_back(toClipperPoint({x2, y2}));
-	path.push_back(toClipperPoint({x1, y2}));
-	path.push_back(toClipperPoint({x1, y}));
-	paths.push_back(path);
+	clipper2::Paths64 paths;
+	{
+		clipper2::Path64 &path = paths.emplace_back();
+		path.push_back(toClipperPoint({x, y1}));
+		path.push_back(toClipperPoint({x2, y1}));
+		path.push_back(toClipperPoint({x2, y2}));
+		path.push_back(toClipperPoint({x1, y2}));
+		path.push_back(toClipperPoint({x1, y}));
+	}
 
-	path.clear();
-	double w = silkscreenWidth * 0.5;
-	path.push_back(toClipperPoint({x1 - w, y1 - w}));
-	path.push_back(toClipperPoint({x1 + w, y1 - w}));
-	path.push_back(toClipperPoint({x1 + w, y1 + w}));
-	path.push_back(toClipperPoint({x1 - w, y1 + w}));
-	path.push_back(toClipperPoint({x1 - w, y1 - w}));
-	paths.push_back(path);
+	// add pin1 indicator
+	{
+		clipper2::Path64 &path = paths.emplace_back();
+		double w = silkscreenWidth * 0.5;
+		path.push_back(toClipperPoint({x1 - w, y1 - w}));
+		path.push_back(toClipperPoint({x1 + w, y1 - w}));
+		path.push_back(toClipperPoint({x1 + w, y1 + w}));
+		path.push_back(toClipperPoint({x1 - w, y1 + w}));
+		path.push_back(path.front()); // close square becaue it is treated as open path
+	}
 
+	clipper.AddOpenSubject(paths);
 }
 
-inline void addSilkscreenPad(clipperlib::Paths64 &paths, double2 center, double2 size, double2 drill) {
+inline void addSilkscreenPad(clipper2::Paths64 &paths, double2 center, double2 size, double2 drill) {
 	size.x = std::max(size.x, drill.x);
 	size.y = std::max(size.y, drill.y);
 	size.x += silkscreenWidth + padClearance * 2;
@@ -419,7 +454,7 @@ inline void addSilkscreenPad(clipperlib::Paths64 &paths, double2 center, double2
 	double x2 = center.x + size.x * 0.5;
 	double y2 = center.y - size.y * 0.5;
 
-	clipperlib::Path64 path;
+	clipper2::Path64 path;
 	path.push_back(toClipperPoint({x1, y1}));
 	path.push_back(toClipperPoint({x2, y1}));
 	path.push_back(toClipperPoint({x2, y2}));
@@ -449,7 +484,7 @@ void silkscreenRectangle(std::ofstream &s, double2 center, double2 size) {
 	line(s, {x1, y2}, {x1, y}, silkscreenWidth, "F.SilkS");
 }*/
 
-void silkscreenPaths(std::ofstream &s, const clipperlib::Paths64 &paths) {
+void silkscreenPaths(std::ofstream &s, const clipper2::Paths64 &paths) {
 	for (auto &path : paths) {
 		int count = path.size();
 		for (int i = 0; i < count - 1; ++i) {
@@ -480,13 +515,16 @@ void fabRectangle(std::ofstream &s, double2 center, double2 size) {
 	line(s, {x1, y2}, {x1, y}, silkscreenWidth, "F.Fab");
 }
 
-void generateSip(std::ofstream &s, double2 globalPosition, const Footprint::Pad &pad, clipperlib::Paths64 &clips) {
+void generateSip(std::ofstream &s, double2 globalPosition, const Footprint::Pad &pad, clipper2::Paths64 &clips) {
 	int count = pad.count;
 
-	double drillOffset = pad.distance.x;
+	//double drillOffset = pad.distance.x;
+
+	// drill offset
+	double2 drillOffset = pad.drillOffset;// - pad.offset;
 
 	// position of first pin
-	double2 position = globalPosition + pad.position + double2((pad.pitch * (count - 1)) * -0.5, 0);
+	double2 position = globalPosition + pad.position + double2((pad.pitch * (count - 1)) * -0.5, 0) + pad.offset;
 
 	// generate pins
 	for (int i = 0; i < count; ++i) {
@@ -497,26 +535,26 @@ void generateSip(std::ofstream &s, double2 globalPosition, const Footprint::Pad 
 		switch (pad.numbering) {
 		case Footprint::Numbering::CIRCULAR:
 		case Footprint::Numbering::ZIGZAG:
-			n = pad.number + index;
+			n = pad.number + index * pad.increment;
 			break;
 		case Footprint::Numbering::DOUBLE:
-			n = pad.number + index / 2;
+			n = pad.number + (index / 2) * pad.increment;
 			break;
 		}
 
 
 		if (pad.hasNumber(n)) {
-			generatePad(s, n, ROUNDRECT, position, pad.size, pad.drill, {0, drillOffset}, pad.clearance, pad.maskMargin);
-			addSilkscreenPad(clips, position, pad.size, pad.drill);
+			generatePad(s, n, position, pad.size, pad.shape, pad.drillSize, drillOffset, pad.clearance, pad.maskMargin);
+			addSilkscreenPad(clips, position, pad.size, pad.drillSize);
 		}
 		position.x += pad.pitch;
 	}
 }
 
-void generateDip(std::ofstream &s, double2 globalPosition, const Footprint::Pad &pad, clipperlib::Paths64 &clips) {
+void generateDip(std::ofstream &s, double2 globalPosition, const Footprint::Pad &pad, clipper2::Paths64 &clips) {
 	int count = pad.count / 2;
 
-	double padDistance, drillOffset;
+	/*double padDistance, drillOffset;
 	if (pad.distance.y > pad.distance.x) {
 		// pad and drill distance
 		padDistance = pad.distance.x - pad.size.y;
@@ -530,10 +568,21 @@ void generateDip(std::ofstream &s, double2 globalPosition, const Footprint::Pad 
 		// only pad distance (outer edges)
 		padDistance = pad.distance.x - pad.size.y;
 		drillOffset = 0;
-	}
+	}*/
 
-	// position of first pin of lower row
-	double2 position1 = globalPosition + pad.position + double2((pad.pitch * (count - 1)) * -0.5, padDistance * 0.5);
+
+	// drill offset
+	double2 drillOffset1 = pad.drillOffset;// - pad.offset;
+	double2 drillOffset2 = -drillOffset1;
+
+	double padDistance = pad.distance.x;
+
+	// position of first pin
+	double2 position1 = globalPosition + pad.position + double2((pad.pitch * (count - 1)) * -0.5, padDistance * 0.5) + pad.offset;
+	double2 position2 = globalPosition + pad.position + double2((pad.pitch * (count - 1)) * -0.5, padDistance * -0.5) - pad.offset;
+
+	// position of first pin of first (lower) row
+	//double2 position1 = globalPosition + pad.position + double2((pad.pitch * (count - 1)) * -0.5, padDistance * 0.5);
 
 	// generate pins
 	for (int i = 0; i < count; ++i) {
@@ -542,34 +591,40 @@ void generateDip(std::ofstream &s, double2 globalPosition, const Footprint::Pad 
 		int n1, n2;
 		switch (pad.numbering) {
 		case Footprint::Numbering::CIRCULAR:
-			n1 = pad.number + index;
-			n2 = pad.number + pad.count - 1 - index;
+			n1 = pad.number + index * pad.increment;
+			n2 = pad.number + (pad.count - 1 - index) * pad.increment;
 			break;
 		case Footprint::Numbering::ZIGZAG:
-			n1 = pad.number + index * 2;
-			n2 = pad.number + index * 2 + 1;
+			n1 = pad.number + (index * 2) * pad.increment;
+			n2 = pad.number + (index * 2 + 1) * pad.increment;
 			break;
 		case Footprint::Numbering::DOUBLE:
-			n1 = pad.number + index;
+			n1 = pad.number + index * pad.increment;
 			n2 = n1;
 			break;
 		}
 
-		double2 position2 = position1 + double2(0, -padDistance);
+		//double2 position2 = position1 + double2(0, -padDistance);
 
+		// first row
 		if (pad.hasNumber(n1)) {
-			generatePad(s, n1, ROUNDRECT, position1, pad.size, pad.drill, {0, drillOffset}, pad.clearance, pad.maskMargin);
-			addSilkscreenPad(clips, position1, pad.size, pad.drill);
+			generatePad(s, n1, position1, pad.size, pad.shape, pad.drillSize, drillOffset1, pad.clearance, pad.maskMargin);
+			addSilkscreenPad(clips, position1, pad.size, pad.drillSize);
 		}
+
+		// second row
 		if (pad.hasNumber(n2)) {
-			generatePad(s, n2, ROUNDRECT, position2, pad.size, pad.drill, {0, -drillOffset}, pad.clearance, pad.maskMargin);
-			addSilkscreenPad(clips, position2, pad.size, pad.drill);
+			generatePad(s, n2, position2, pad.size, pad.shape, pad.drillSize, drillOffset2, pad.clearance, pad.maskMargin);
+			addSilkscreenPad(clips, position2, pad.size, pad.drillSize);
 		}
+
+		// increment position
 		position1.x += pad.pitch;
+		position2.x += pad.pitch;
 	}
 }
 
-void generateQfp(std::ofstream &s, double2 globalPosition, const Footprint::Pad &pad, clipperlib::Paths64 &clips) {
+void generateQfp(std::ofstream &s, double2 globalPosition, const Footprint::Pad &pad, clipper2::Paths64 &clips) {
 
 }
 
@@ -594,8 +649,8 @@ bool generateFootprint(const fs::path &path, const std::string &name, const Foot
 	s << "  (solder_mask_margin " << maskMargin << ")" << std::endl;
 	s << "  (solder_paste_margin " << pasteMargin << ")" << std::endl;
 
-	clipperlib::Clipper64 clipper;
-	clipperlib::Paths64 clips;
+	clipper2::Clipper64 clipper;
+	clipper2::Paths64 clips;
 
 	// body
 	if (haveBody) {
@@ -610,9 +665,9 @@ bool generateFootprint(const fs::path &path, const std::string &name, const Foot
 		fabRectangle(s, footprint.position, size);
 
 		// add silkscreen rectangle
-		clipperlib::Paths64 rectangle;
-		addSilkscreenRectangle(rectangle, footprint.position, size);
-		clipper.AddOpenSubject(rectangle);
+		if (footprint.silkscreen) {
+			addSilkscreenRectangle(clipper, footprint.position, size);
+		}
 	}
 
 	// components
@@ -631,13 +686,13 @@ bool generateFootprint(const fs::path &path, const std::string &name, const Foot
 	}
 
 	// silkscreen
-	if (haveBody) {
+	if (footprint.silkscreen && haveBody) {
 		clipper.AddClip(clips);
 
 		// subtract pads from silkscreen
-		clipperlib::Paths64 dummy;
-		clipperlib::Paths64 result;
-		clipper.Execute(clipperlib::ClipType::Difference, clipperlib::FillRule::NonZero, dummy, result);
+		clipper2::Paths64 dummy;
+		clipper2::Paths64 result;
+		clipper.Execute(clipper2::ClipType::Difference, clipper2::FillRule::NonZero, dummy, result);
 		silkscreenPaths(s, result);
 	}
 
@@ -646,6 +701,7 @@ bool generateFootprint(const fs::path &path, const std::string &name, const Foot
 
 	s.close();
 
+	// return true when vrml should be generated
 	return haveBody;
 }
 

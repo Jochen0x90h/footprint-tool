@@ -1,6 +1,6 @@
 add_executable(${PROJECT_NAME}
 	main.cpp
-	clipperlib.hpp
+	clipper2.hpp
 	double2.hpp
 	double3.hpp
 )

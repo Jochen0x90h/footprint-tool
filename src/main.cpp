@@ -36,14 +36,17 @@ struct Footprint {
 	// pad or pad array
 	struct Pad {
 		enum class Type {
-			// single in-line package
-			SIP,
+			// single line of pads
+			SINGLE,
 
-			// dual in-line package
-			DIP,
+			// dual pad lines
+			DUAL,
 
-			// quad flat package
-			QFP
+			// quad pad lines (square or rectangular)
+			QUAD,
+
+			// matrix of pads
+			MATRIX
 		};
 
 		// global position of pad or center of multiple pads
@@ -70,8 +73,12 @@ struct Footprint {
 		// solder mask margin
 		double maskMargin = 0;
 
+		// layer
+		bool back = false;
+
+
 		// package type for generating multiple pads
-		Type type = Type::SIP;
+		Type type = Type::SINGLE;
 
 		// pitch between pads
 		double pitch = 0;
@@ -82,23 +89,39 @@ struct Footprint {
 		// number of pads
 		int count = 1;
 
-		// pad number or number of first pad
+		// mirror pads (pin 1 right instead of left)
+		bool mirror = false;
+
+		// numbering scheme
+		Numbering numbering = Numbering::CIRCULAR;
+
+		// number of first pad
 		int number = 1;
 
 		// pad number increment
 		int increment = 1;
 
-		// numbering scheme
-		Numbering numbering = Numbering::CIRCULAR;
+		// pad names (override numbers)
+		std::vector<std::string> names;
+
 
 		// pad numbers to exclude
-		std::set<int> exclude;
+		//std::set<int> exclude;
 
-		// mirror pads
-		bool mirror = false;
+		//bool hasNumber(int number) const {
+	//		return !this->exclude.contains(number);
+		//}
 
-		bool hasNumber(int number) const {
-			return !this->exclude.contains(number);
+		bool exists(int index) const {
+			return index >= this->names.size() || !this->names[index].empty();
+		}
+
+		std::string getName(int index) const {
+			if (index >= this->names.size()) {
+				return std::to_string(this->number + index * this->increment);
+			} else {
+				return this->names[index];
+			}
 		}
 	};
 
@@ -212,15 +235,20 @@ void readPad(json &j, Footprint::Pad &pad) {
 	// solder mask margin
 	read(j, "maskMargin", pad.maskMargin);
 
+	// back side
+	read(j, "back", pad.back);
+
 
 	// type
 	std::string type = j.value("type", std::string());
-	if (type == "sip")
-		pad.type = Footprint::Pad::Type::SIP;
-	else if (type == "dip")
-		pad.type = Footprint::Pad::Type::DIP;
-	else if (type == "qfp")
-		pad.type = Footprint::Pad::Type::QFP;
+	if (type == "dual")
+		pad.type = Footprint::Pad::Type::DUAL;
+	else if (type == "quad")
+		pad.type = Footprint::Pad::Type::QUAD;
+	else if (type == "matrix")
+		pad.type = Footprint::Pad::Type::MATRIX;
+	else
+		pad.type = Footprint::Pad::Type::SINGLE;
 
 	// pitch
 	read(j, "pitch", pad.pitch);
@@ -231,18 +259,8 @@ void readPad(json &j, Footprint::Pad &pad) {
 	// pad count
 	read(j, "count", pad.count);
 
-	// first pad number
-	read(j, "number", pad.number);
-
-	// pad number increment
-	read(j, "increment", pad.increment);
-
-	// exclude numbers
-	if (j.contains("exclude")) {
-		for (auto number : j.at("exclude")) {
-			pad.exclude.insert(number.get<int>());
-		}
-	}
+	// mirror
+	read(j, "mirror", pad.mirror);
 
 	// numbering
 	std::string numbering = j.value("numbering", std::string());
@@ -253,8 +271,27 @@ void readPad(json &j, Footprint::Pad &pad) {
 	else if (numbering == "double")
 		pad.numbering = Footprint::Numbering::DOUBLE;
 
-	// mirror
-	read(j, "mirror", pad.mirror);
+	// first pad number
+	read(j, "number", pad.number);
+
+	// pad number increment
+	read(j, "increment", pad.increment);
+
+	// pad names
+	if (j.contains("names")) {
+		for (auto name : j.at("names")) {
+			pad.names.push_back(name.get<std::string>());
+		}
+	}
+
+	/*
+	// exclude numbers
+	if (j.contains("exclude")) {
+		for (auto number : j.at("exclude")) {
+			pad.exclude.insert(number.get<int>());
+		}
+	}*/
+
 }
 
 void readFootprint(json &j, std::map<std::string, Footprint> &footprints, Footprint &footprint) {
@@ -333,13 +370,13 @@ void readJson(const fs::path &path, std::map<std::string, Footprint> &footprints
 }
 
 // define a pad
-void generatePad(std::ofstream &s, int index, double2 position, double2 size, double shape, double2 drillSize, double2 drillOffset, double clearance, double maskMargin, const char *layers = nullptr) {
+void generatePad(std::ofstream &s, std::string_view name, double2 position, double2 size, double shape, double2 drillSize, double2 drillOffset, double clearance, double maskMargin, bool back) {
 	bool hasPad = size.positive();
 	bool hasDrill = drillSize.positive();
 
 	// pad
 	if (hasPad) {
-		s << "  (pad " << index << " ";
+		s << "  (pad \"" << name << "\" ";
 		s << (hasDrill ? "thru_hole" : "smd");
 	} else {
 		s << "  (pad \"\" np_thru_hole";
@@ -382,8 +419,7 @@ void generatePad(std::ofstream &s, int index, double2 position, double2 size, do
 		s << " (solder_mask_margin " << maskMargin << ")";
 
 	// layers
-	if (layers == nullptr)
-		layers = hasDrill ? "*.Cu *.Mask" : "F.Cu F.Mask F.Paste";
+	const char *layers = hasDrill ? "*.Cu *.Mask" : (back ? "B.Cu B.Mask B.Paste" : "F.Cu F.Mask F.Paste");
 	s << " (layers " << layers << "))" << std::endl;
 }
 
@@ -515,16 +551,14 @@ void fabRectangle(std::ofstream &s, double2 center, double2 size) {
 	line(s, {x1, y2}, {x1, y}, silkscreenWidth, "F.Fab");
 }
 
-void generateSip(std::ofstream &s, double2 globalPosition, const Footprint::Pad &pad, clipper2::Paths64 &clips) {
+void generateSingle(std::ofstream &s, double2 globalPosition, const Footprint::Pad &pad, clipper2::Paths64 &clips) {
 	int count = pad.count;
-
-	//double drillOffset = pad.distance.x;
-
-	// drill offset
-	double2 drillOffset = pad.drillOffset;// - pad.offset;
 
 	// position of first pin
 	double2 position = globalPosition + pad.position + double2((pad.pitch * (count - 1)) * -0.5, 0) + pad.offset;
+
+	// drill offset
+	double2 drillOffset = pad.drillOffset;
 
 	// generate pins
 	for (int i = 0; i < count; ++i) {
@@ -535,45 +569,25 @@ void generateSip(std::ofstream &s, double2 globalPosition, const Footprint::Pad 
 		switch (pad.numbering) {
 		case Footprint::Numbering::CIRCULAR:
 		case Footprint::Numbering::ZIGZAG:
-			n = pad.number + index * pad.increment;
+			n = index;//pad.number + index * pad.increment;
 			break;
 		case Footprint::Numbering::DOUBLE:
-			n = pad.number + (index / 2) * pad.increment;
+			n = index / 2;//pad.number + (index / 2) * pad.increment;
 			break;
 		}
 
 
-		if (pad.hasNumber(n)) {
-			generatePad(s, n, position, pad.size, pad.shape, pad.drillSize, drillOffset, pad.clearance, pad.maskMargin);
+		//if (pad.hasNumber(n)) {
+		if (pad.exists(n)) {
+			generatePad(s, pad.getName(n), position, pad.size, pad.shape, pad.drillSize, drillOffset, pad.clearance, pad.maskMargin, pad.back);
 			addSilkscreenPad(clips, position, pad.size, pad.drillSize);
 		}
 		position.x += pad.pitch;
 	}
 }
 
-void generateDip(std::ofstream &s, double2 globalPosition, const Footprint::Pad &pad, clipper2::Paths64 &clips) {
+void generateDual(std::ofstream &s, double2 globalPosition, const Footprint::Pad &pad, clipper2::Paths64 &clips) {
 	int count = pad.count / 2;
-
-	/*double padDistance, drillOffset;
-	if (pad.distance.y > pad.distance.x) {
-		// pad and drill distance
-		padDistance = pad.distance.x - pad.size.y;
-		double drillDistance = pad.distance.y;
-		drillOffset = (padDistance - drillDistance) * 0.5;
-	} else if (pad.drill.positive()) {
-		// only drill distance
-		padDistance = pad.distance.x;
-		drillOffset = 0;
-	} else {
-		// only pad distance (outer edges)
-		padDistance = pad.distance.x - pad.size.y;
-		drillOffset = 0;
-	}*/
-
-
-	// drill offset
-	double2 drillOffset1 = pad.drillOffset;// - pad.offset;
-	double2 drillOffset2 = -drillOffset1;
 
 	double padDistance = pad.distance.x;
 
@@ -581,8 +595,9 @@ void generateDip(std::ofstream &s, double2 globalPosition, const Footprint::Pad 
 	double2 position1 = globalPosition + pad.position + double2((pad.pitch * (count - 1)) * -0.5, padDistance * 0.5) + pad.offset;
 	double2 position2 = globalPosition + pad.position + double2((pad.pitch * (count - 1)) * -0.5, padDistance * -0.5) - pad.offset;
 
-	// position of first pin of first (lower) row
-	//double2 position1 = globalPosition + pad.position + double2((pad.pitch * (count - 1)) * -0.5, padDistance * 0.5);
+	// drill offset
+	double2 drillOffset1 = pad.drillOffset;
+	double2 drillOffset2 = -drillOffset1;
 
 	// generate pins
 	for (int i = 0; i < count; ++i) {
@@ -591,30 +606,34 @@ void generateDip(std::ofstream &s, double2 globalPosition, const Footprint::Pad 
 		int n1, n2;
 		switch (pad.numbering) {
 		case Footprint::Numbering::CIRCULAR:
-			n1 = pad.number + index * pad.increment;
-			n2 = pad.number + (pad.count - 1 - index) * pad.increment;
+			//n1 = pad.number + index * pad.increment;
+			//n2 = pad.number + (pad.count - 1 - index) * pad.increment;
+			n1 = index;
+			n2 = pad.count - 1 - index;
 			break;
 		case Footprint::Numbering::ZIGZAG:
-			n1 = pad.number + (index * 2) * pad.increment;
-			n2 = pad.number + (index * 2 + 1) * pad.increment;
+			//n1 = pad.number + (index * 2) * pad.increment;
+			//n2 = pad.number + (index * 2 + 1) * pad.increment;
+			n1 = index * 2;
+			n2 = index * 2 + 1;
 			break;
 		case Footprint::Numbering::DOUBLE:
-			n1 = pad.number + index * pad.increment;
+			//n1 = pad.number + index * pad.increment;
+			//n2 = n1;
+			n1 = index;
 			n2 = n1;
 			break;
 		}
 
-		//double2 position2 = position1 + double2(0, -padDistance);
-
 		// first row
-		if (pad.hasNumber(n1)) {
-			generatePad(s, n1, position1, pad.size, pad.shape, pad.drillSize, drillOffset1, pad.clearance, pad.maskMargin);
+		if (pad.exists(n1)) {
+			generatePad(s, pad.getName(n1), position1, pad.size, pad.shape, pad.drillSize, drillOffset1, pad.clearance, pad.maskMargin, pad.back);
 			addSilkscreenPad(clips, position1, pad.size, pad.drillSize);
 		}
 
 		// second row
-		if (pad.hasNumber(n2)) {
-			generatePad(s, n2, position2, pad.size, pad.shape, pad.drillSize, drillOffset2, pad.clearance, pad.maskMargin);
+		if (pad.exists(n2)) {
+			generatePad(s, pad.getName(n2), position2, pad.size, pad.shape, pad.drillSize, drillOffset2, pad.clearance, pad.maskMargin, pad.back);
 			addSilkscreenPad(clips, position2, pad.size, pad.drillSize);
 		}
 
@@ -624,7 +643,11 @@ void generateDip(std::ofstream &s, double2 globalPosition, const Footprint::Pad 
 	}
 }
 
-void generateQfp(std::ofstream &s, double2 globalPosition, const Footprint::Pad &pad, clipper2::Paths64 &clips) {
+void generateQuad(std::ofstream &s, double2 globalPosition, const Footprint::Pad &pad, clipper2::Paths64 &clips) {
+
+}
+
+void generateMatrix(std::ofstream &s, double2 globalPosition, const Footprint::Pad &pad, clipper2::Paths64 &clips) {
 
 }
 
@@ -673,14 +696,17 @@ bool generateFootprint(const fs::path &path, const std::string &name, const Foot
 	// components
 	for (auto &pad : footprint.pads) {
 		switch (pad.type) {
-		case Footprint::Pad::Type::SIP:
-			generateSip(s, footprint.position, pad, clips);
+		case Footprint::Pad::Type::SINGLE:
+			generateSingle(s, footprint.position, pad, clips);
 			break;
-		case Footprint::Pad::Type::DIP:
-			generateDip(s, footprint.position, pad, clips);
+		case Footprint::Pad::Type::DUAL:
+			generateDual(s, footprint.position, pad, clips);
 			break;
-		case Footprint::Pad::Type::QFP:
-			generateQfp(s, footprint.position, pad, clips);
+		case Footprint::Pad::Type::QUAD:
+			generateQuad(s, footprint.position, pad, clips);
+			break;
+		case Footprint::Pad::Type::MATRIX:
+			generateMatrix(s, footprint.position, pad, clips);
 			break;
 		}
 	}

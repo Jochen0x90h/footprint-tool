@@ -33,6 +33,10 @@ inline double3 operator *(double3 a, double3 b) {
 	return {a.x * b.x, a.y * b.y, a.z * b.z};
 }
 
+inline double3 operator /(double3 a, double b) {
+	return {a.x / b, a.y / b, a.z / b};
+}
+
 inline std::ostream &operator <<(std::ostream &s, double3 value) {
 	s << value.x << ' ' << value.y << ' ' << value.z;
 	return s;

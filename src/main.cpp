@@ -46,7 +46,7 @@ struct Footprint {
 			QUAD,
 
 			// matrix of pads
-			MATRIX
+			GRID
 		};
 
 		// global position of pad or center of multiple pads
@@ -104,18 +104,12 @@ struct Footprint {
 		// pad names (override numbers)
 		std::vector<std::string> names;
 
-
-		// pad numbers to exclude
-		//std::set<int> exclude;
-
-		//bool hasNumber(int number) const {
-	//		return !this->exclude.contains(number);
-		//}
-
+		// check if pin exists (pin with empty name does not exist)
 		bool exists(int index) const {
 			return index >= this->names.size() || !this->names[index].empty();
 		}
 
+		// get name of pin
 		std::string getName(int index) const {
 			if (index >= this->names.size()) {
 				return std::to_string(this->number + index * this->increment);
@@ -125,7 +119,18 @@ struct Footprint {
 		}
 	};
 
+	// line or polyline
+	struct Line {
+		std::string layer;
+		double width;
+		std::vector<double2> points;
+	};
+
+
+	// true if this is a template, i.e. no footprint gets generated
 	bool template_ = false;
+
+	// name and description of footprint
 	std::string name;
 	std::string description;
 
@@ -144,9 +149,18 @@ struct Footprint {
 	// global position
 	double2 position;
 
+	// offset of body
+	double3 offset;
+
 	// list of pads (pad arrays)
 	std::vector<Pad> pads;
 
+
+	// lines
+	std::vector<Line> lines;
+
+
+	// get type of footrpint
 	Type getType() const {
 		if (this->type == Footprint::Type::DETECT) {
 			// detect footprint type
@@ -245,8 +259,8 @@ void readPad(json &j, Footprint::Pad &pad) {
 		pad.type = Footprint::Pad::Type::DUAL;
 	else if (type == "quad")
 		pad.type = Footprint::Pad::Type::QUAD;
-	else if (type == "matrix")
-		pad.type = Footprint::Pad::Type::MATRIX;
+	else if (type == "grid")
+		pad.type = Footprint::Pad::Type::GRID;
 	else
 		pad.type = Footprint::Pad::Type::SINGLE;
 
@@ -294,6 +308,27 @@ void readPad(json &j, Footprint::Pad &pad) {
 
 }
 
+void readLine(json &j, Footprint::Line &line) {
+	// layer
+	read(j, "layer", line.layer);
+
+	// width
+	read(j, "width", line.width);
+
+	// pads or pad arrays
+	if (j.contains("points")) {
+		auto jp = j.at("points");
+
+		int size = jp.size();
+		for (int i = 0; i < size - 1; i += 2) {
+			double x = jp.at(i + 0).get<double>();
+			double y = jp.at(i + 1).get<double>();
+			line.points.emplace_back(x, y);
+		}
+	}
+}
+
+
 void readFootprint(json &j, std::map<std::string, Footprint> &footprints, Footprint &footprint) {
 	// inherit existing footprint
 	std::string inherit = j.value("inherit", std::string());
@@ -319,19 +354,34 @@ void readFootprint(json &j, std::map<std::string, Footprint> &footprints, Footpr
 	// global position
 	read(j, "position", footprint.position);
 
-	// pads/pad arrays
+	// offset, applies only to body
+	read(j, "offset", footprint.offset);
+
+	// pads or pad arrays
 	if (j.contains("pads")) {
 		auto jp = j.at("pads");
 
 		int size = jp.size();
 		footprint.pads.resize(size);
 		for (int i = 0; i < size; ++i) {
-			// read per-component values
+			// read pad or pad array
 			readPad(jp.at(i), footprint.pads[i]);
 		}
 	} else {
 		// no pads
 		footprint.pads.clear();
+	}
+
+	// lines or polylines
+	if (j.contains("lines")) {
+		auto jl = j.at("lines");
+
+		int size = jl.size();
+		footprint.lines.resize(size);
+		for (int i = 0; i < size; ++i) {
+			// read line or polyline
+			readLine(jl.at(i), footprint.lines[i]);
+		}
 	}
 
 	// type
@@ -370,7 +420,7 @@ void readJson(const fs::path &path, std::map<std::string, Footprint> &footprints
 }
 
 // define a pad
-void generatePad(std::ofstream &s, std::string_view name, double2 position, double2 size, double shape, double2 drillSize, double2 drillOffset, double clearance, double maskMargin, bool back) {
+void writePad(std::ostream &s, std::string_view name, double2 position, double2 size, double shape, double2 drillSize, double2 padOffset, double clearance, double maskMargin, bool back) {
 	bool hasPad = size.positive();
 	bool hasDrill = drillSize.positive();
 
@@ -379,6 +429,7 @@ void generatePad(std::ofstream &s, std::string_view name, double2 position, doub
 		s << "  (pad \"" << name << "\" ";
 		s << (hasDrill ? "thru_hole" : "smd");
 	} else {
+		// only hole
 		s << "  (pad \"\" np_thru_hole";
 		shape = CIRCLE;
 		size = drillSize;
@@ -407,8 +458,8 @@ void generatePad(std::ofstream &s, std::string_view name, double2 position, doub
 			s << drillSize.x;
 		else
 			s << "oval " << drillSize;
-		if (!drillOffset.zero())
-			s << " (offset " << drillOffset << ")";
+		if (!padOffset.zero())
+			s << " (offset " << padOffset << ")";
 		s << ")";
 	}
 
@@ -423,21 +474,52 @@ void generatePad(std::ofstream &s, std::string_view name, double2 position, doub
 	s << " (layers " << layers << "))" << std::endl;
 }
 
-void line(std::ofstream &s, double2 p1, double2 p2, double width, const char *layer) {
+void writeLine(std::ostream &s, double2 p1, double2 p2, double width, std::string_view layer) {
 	s << "  (fp_line (start " << p1 << ") (end " << p2 << ") (width " << width << ") (layer " << layer << "))" << std::endl;
 }
 
+void writeLine(std::ostream &s, double2 position, const Footprint::Line &line) {
+	int segmentCount = line.points.size() - 1;
+	for (int i = 0; i < segmentCount; ++i) {
+		auto p1 = position + line.points[i];
+		auto p2 = position + line.points[i + 1];
+
+		s << "  (fp_line "
+			"(start " << p1 << ") "
+			"(end " << p2 << ") "
+			"(width " << line.width << ") "
+			"(layer \"" << line.layer << "\") "
+			")" << std::endl;
+	}
+}
+/*
+void writePolygon(std::ostream &s, const std::vector<double2> &points, double width, std::string_view layer) {
+	s << "  (fp_poly " << std::endl;
+	s << "    (pts" << std::endl;
+
+	int segmentCount = points.size() - 1;
+	for (int i = 0; i < segmentCount; ++i) {
+		auto p = points[i];
+		s << "      (xy " << p << ')' << std::endl;
+	}
+
+	s << "    ) "
+		"(layer \"" << layer << "\") "
+		"(width " << width << ") "
+		"(fill solid) "
+		")" << std::endl;
+}*/
 
 // draw a rectangle to courtyard layer
-void rectangle(std::ofstream &s, double2 center, double2 size, double width, const char *layer) {
+void writeRectangle(std::ostream &s, double2 center, double2 size, double width, const char *layer) {
 	double x1 = center.x - size.x * 0.5;
 	double y1 = center.y - size.y * 0.5;
 	double x2 = center.x + size.x * 0.5;
 	double y2 = center.y + size.y * 0.5;
-	line(s, {x1, y1}, {x2, y1}, width, layer);
-	line(s, {x2, y1}, {x2, y2}, width, layer);
-	line(s, {x2, y2}, {x1, y2}, width, layer);
-	line(s, {x1, y2}, {x1, y1}, width, layer);
+	writeLine(s, {x1, y1}, {x2, y1}, width, layer);
+	writeLine(s, {x2, y1}, {x2, y2}, width, layer);
+	writeLine(s, {x2, y2}, {x1, y2}, width, layer);
+	writeLine(s, {x1, y2}, {x1, y1}, width, layer);
 }
 
 constexpr double silkscreenWidth = 0.15;
@@ -520,13 +602,13 @@ void silkscreenRectangle(std::ofstream &s, double2 center, double2 size) {
 	line(s, {x1, y2}, {x1, y}, silkscreenWidth, "F.SilkS");
 }*/
 
-void silkscreenPaths(std::ofstream &s, const clipper2::Paths64 &paths) {
+void writeSilkscreenPaths(std::ostream &s, const clipper2::Paths64 &paths) {
 	for (auto &path : paths) {
 		int count = path.size();
 		for (int i = 0; i < count - 1; ++i) {
 			auto p1 = toPoint(path[i]);
 			auto p2 = toPoint(path[(i + 1) % count]);
-			line(s, p1, p2, silkscreenWidth, "F.SilkS");
+			writeLine(s, p1, p2, silkscreenWidth, "F.SilkS");
 		}
 	}
 }
@@ -534,7 +616,7 @@ void silkscreenPaths(std::ofstream &s, const clipper2::Paths64 &paths) {
 constexpr double fabWidth = 0.15;
 constexpr double fabDistance = 0.2;
 
-void fabRectangle(std::ofstream &s, double2 center, double2 size) {
+void writeFabRectangle(std::ofstream &s, double2 center, double2 size) {
 	double x1 = center.x - size.x * 0.5;
 	double y1 = center.y + size.y * 0.5;
 	double x2 = center.x + size.x * 0.5;
@@ -544,21 +626,31 @@ void fabRectangle(std::ofstream &s, double2 center, double2 size) {
 	double x = x1 + (x2 > x1 ? d : -d);
 	double y = y1 + (y2 > y1 ? d : -d);
 
-	line(s, {x, y1}, {x1, y}, silkscreenWidth, "F.Fab");
-	line(s, {x, y1}, {x2, y1}, silkscreenWidth, "F.Fab");
-	line(s, {x2, y1}, {x2, y2}, silkscreenWidth, "F.Fab");
-	line(s, {x2, y2}, {x1, y2}, silkscreenWidth, "F.Fab");
-	line(s, {x1, y2}, {x1, y}, silkscreenWidth, "F.Fab");
+	writeLine(s, {x, y1}, {x1, y}, silkscreenWidth, "F.Fab");
+	writeLine(s, {x, y1}, {x2, y1}, silkscreenWidth, "F.Fab");
+	writeLine(s, {x2, y1}, {x2, y2}, silkscreenWidth, "F.Fab");
+	writeLine(s, {x2, y2}, {x1, y2}, silkscreenWidth, "F.Fab");
+	writeLine(s, {x1, y2}, {x1, y}, silkscreenWidth, "F.Fab");
 }
 
-void generateSingle(std::ofstream &s, double2 globalPosition, const Footprint::Pad &pad, clipper2::Paths64 &clips) {
+void writeSingle(std::ofstream &s, double2 globalPosition, const Footprint::Pad &pad, clipper2::Paths64 &clips) {
 	int count = pad.count;
+	bool hasPad = pad.size.positive();
+	bool hasDrill = pad.drillSize.positive();
 
 	// position of first pin
-	double2 position = globalPosition + pad.position + double2((pad.pitch * (count - 1)) * -0.5, 0) + pad.offset;
+	double2 position = globalPosition + pad.position + double2((pad.pitch * (count - 1)) * -0.5, 0);
 
-	// drill offset
-	double2 drillOffset = pad.drillOffset;
+	// offset of pad relative to drill
+	double2 padOffset = {0, 0};
+
+	if (!hasDrill) {
+		position += pad.offset;
+	} else {
+		position += pad.drillOffset;
+		if (hasPad)
+			padOffset = pad.offset - pad.drillOffset;
+	}
 
 	// generate pins
 	for (int i = 0; i < count; ++i) {
@@ -579,25 +671,39 @@ void generateSingle(std::ofstream &s, double2 globalPosition, const Footprint::P
 
 		//if (pad.hasNumber(n)) {
 		if (pad.exists(n)) {
-			generatePad(s, pad.getName(n), position, pad.size, pad.shape, pad.drillSize, drillOffset, pad.clearance, pad.maskMargin, pad.back);
+			writePad(s, pad.getName(n), position, pad.size, pad.shape, pad.drillSize, padOffset, pad.clearance, pad.maskMargin, pad.back);
 			addSilkscreenPad(clips, position, pad.size, pad.drillSize);
 		}
 		position.x += pad.pitch;
 	}
 }
 
-void generateDual(std::ofstream &s, double2 globalPosition, const Footprint::Pad &pad, clipper2::Paths64 &clips) {
+void writeDual(std::ofstream &s, double2 globalPosition, const Footprint::Pad &pad, clipper2::Paths64 &clips) {
 	int count = pad.count / 2;
+	bool hasPad = pad.size.positive();
+	bool hasDrill = pad.drillSize.positive();
 
 	double padDistance = pad.distance.x;
 
-	// position of first pin
-	double2 position1 = globalPosition + pad.position + double2((pad.pitch * (count - 1)) * -0.5, padDistance * 0.5) + pad.offset;
-	double2 position2 = globalPosition + pad.position + double2((pad.pitch * (count - 1)) * -0.5, padDistance * -0.5) - pad.offset;
+	// position of first pin in each row
+	double2 position1 = globalPosition + pad.position + double2((pad.pitch * (count - 1)) * -0.5, padDistance * 0.5);
+	double2 position2 = globalPosition + pad.position + double2((pad.pitch * (count - 1)) * -0.5, padDistance * -0.5);
 
-	// drill offset
-	double2 drillOffset1 = pad.drillOffset;
-	double2 drillOffset2 = -drillOffset1;
+	// offset of pad relative to drill
+	double2 padOffset1 = {0, 0};
+	double2 padOffset2 = {0, 0};
+
+	if (!hasDrill) {
+		position1 += pad.offset;
+		position2 -= pad.offset;
+	} else {
+		position1 += pad.drillOffset;
+		position2 -= pad.drillOffset;
+		if (hasPad) {
+			padOffset1 = pad.offset - pad.drillOffset;
+			padOffset2 = -padOffset1;
+		}
+	}
 
 	// generate pins
 	for (int i = 0; i < count; ++i) {
@@ -606,20 +712,14 @@ void generateDual(std::ofstream &s, double2 globalPosition, const Footprint::Pad
 		int n1, n2;
 		switch (pad.numbering) {
 		case Footprint::Numbering::CIRCULAR:
-			//n1 = pad.number + index * pad.increment;
-			//n2 = pad.number + (pad.count - 1 - index) * pad.increment;
 			n1 = index;
 			n2 = pad.count - 1 - index;
 			break;
 		case Footprint::Numbering::ZIGZAG:
-			//n1 = pad.number + (index * 2) * pad.increment;
-			//n2 = pad.number + (index * 2 + 1) * pad.increment;
 			n1 = index * 2;
 			n2 = index * 2 + 1;
 			break;
 		case Footprint::Numbering::DOUBLE:
-			//n1 = pad.number + index * pad.increment;
-			//n2 = n1;
 			n1 = index;
 			n2 = n1;
 			break;
@@ -627,13 +727,13 @@ void generateDual(std::ofstream &s, double2 globalPosition, const Footprint::Pad
 
 		// first row
 		if (pad.exists(n1)) {
-			generatePad(s, pad.getName(n1), position1, pad.size, pad.shape, pad.drillSize, drillOffset1, pad.clearance, pad.maskMargin, pad.back);
+			writePad(s, pad.getName(n1), position1, pad.size, pad.shape, pad.drillSize, padOffset1, pad.clearance, pad.maskMargin, pad.back);
 			addSilkscreenPad(clips, position1, pad.size, pad.drillSize);
 		}
 
 		// second row
 		if (pad.exists(n2)) {
-			generatePad(s, pad.getName(n2), position2, pad.size, pad.shape, pad.drillSize, drillOffset2, pad.clearance, pad.maskMargin, pad.back);
+			writePad(s, pad.getName(n2), position2, pad.size, pad.shape, pad.drillSize, padOffset2, pad.clearance, pad.maskMargin, pad.back);
 			addSilkscreenPad(clips, position2, pad.size, pad.drillSize);
 		}
 
@@ -643,11 +743,89 @@ void generateDual(std::ofstream &s, double2 globalPosition, const Footprint::Pad
 	}
 }
 
-void generateQuad(std::ofstream &s, double2 globalPosition, const Footprint::Pad &pad, clipper2::Paths64 &clips) {
+double2 rot90(double2 p) {
+	return {p.y, p.x};
+}
+
+double2 swap(double2 p) {
+	return {p.y, p.x};
+}
+
+// write quad (e.g. QFP)
+void writeQuad(std::ofstream &s, double2 globalPosition, const Footprint::Pad &pad, clipper2::Paths64 &clips) {
+	int count = pad.count / 4;
+	bool hasPad = pad.size.positive();
+	bool hasDrill = pad.drillSize.positive();
+
+	// position of first pin in each row
+	double2 position1 = globalPosition + pad.position + double2((pad.pitch * (count - 1)) * -0.5, pad.distance.x * 0.5);
+	double2 position2 = globalPosition + pad.position + double2(pad.distance.y * 0.5, (pad.pitch * (count - 1)) * 0.5);
+	double2 position3 = globalPosition + pad.position + double2((pad.pitch * (count - 1)) * 0.5, pad.distance.x * -0.5);
+	double2 position4 = globalPosition + pad.position + double2(pad.distance.y * -0.5, (pad.pitch * (count - 1)) * -0.5);
+
+	// offset of pad relative to drill
+	double2 padOffset1 = {0, 0};
+	double2 padOffset2 = {0, 0};
+	double2 padOffset3 = {0, 0};
+	double2 padOffset4 = {0, 0};
+
+	if (!hasDrill) {
+		position1 += pad.offset;
+		position2 += rot90(pad.offset);
+		position3 -= pad.offset;
+		position4 -= rot90(pad.offset);
+	} else {
+		position1 += pad.drillOffset;
+		position2 += rot90(pad.drillOffset);
+		position3 -= pad.drillOffset;
+		position4 -= rot90(pad.drillOffset);
+		if (hasPad) {
+			padOffset1 = pad.offset - pad.drillOffset;
+			padOffset2 = rot90(pad.offset - pad.drillOffset);
+			padOffset3 = -padOffset1;
+			padOffset4 = -padOffset3;
+		}
+	}
+
+	double2 padSize24 = swap(pad.size);
+
+	// generate pins
+	for (int i = 0; i < count; ++i) {
+		int index = pad.mirror ? count - 1 - i : i;
+
+		int n1 = index;
+		int n2 = count + index;
+		int n3 = count * 2 + index;
+		int n4 = count * 3 + index;
+
+		if (pad.exists(n1)) {
+			writePad(s, pad.getName(n1), position1, pad.size, pad.shape, pad.drillSize, padOffset1, pad.clearance, pad.maskMargin, pad.back);
+			addSilkscreenPad(clips, position1, pad.size, pad.drillSize);
+		}
+		if (pad.exists(n2)) {
+			writePad(s, pad.getName(n2), position2, padSize24, pad.shape, swap(pad.drillSize), padOffset2, pad.clearance, pad.maskMargin, pad.back);
+			addSilkscreenPad(clips, position2, padSize24, pad.drillSize);
+		}
+		if (pad.exists(n3)) {
+			writePad(s, pad.getName(n3), position3, pad.size, pad.shape, pad.drillSize, padOffset3, pad.clearance, pad.maskMargin, pad.back);
+			addSilkscreenPad(clips, position3, pad.size, pad.drillSize);
+		}
+		if (pad.exists(n4)) {
+			writePad(s, pad.getName(n4), position4, padSize24, pad.shape, swap(pad.drillSize), padOffset4, pad.clearance, pad.maskMargin, pad.back);
+			addSilkscreenPad(clips, position4, padSize24, pad.drillSize);
+		}
+
+		// increment position
+		position1.x += pad.pitch;
+		position2.y -= pad.pitch;
+		position3.x -= pad.pitch;
+		position4.y += pad.pitch;
+	}
 
 }
 
-void generateMatrix(std::ofstream &s, double2 globalPosition, const Footprint::Pad &pad, clipper2::Paths64 &clips) {
+// generate grid (e.g. BGA)
+void writeGrid(std::ofstream &s, double2 globalPosition, const Footprint::Pad &pad, clipper2::Paths64 &clips) {
 
 }
 
@@ -677,38 +855,46 @@ bool generateFootprint(const fs::path &path, const std::string &name, const Foot
 
 	// body
 	if (haveBody) {
+		double2 position = footprint.position + footprint.offset.xy();
 		double2 size = bodySize + footprint.margin * 2.0;
+
+		// apply mirror to size so that pin1 marker is placed at the rigt position
 		if (!footprint.pads.empty() && footprint.pads.front().mirror)
 			size.x *= -1;
 
 		// courtyard
-		rectangle(s, footprint.position, size, 0.05, "F.CrtYd");
+		writeRectangle(s, position, size, 0.05, "F.CrtYd");
 
 		// fabrication layer
-		fabRectangle(s, footprint.position, size);
+		writeFabRectangle(s, position, size);
 
 		// add silkscreen rectangle
 		if (footprint.silkscreen) {
-			addSilkscreenRectangle(clipper, footprint.position, size);
+			addSilkscreenRectangle(clipper, position, size);
 		}
 	}
 
-	// components
+	// pads
 	for (auto &pad : footprint.pads) {
 		switch (pad.type) {
 		case Footprint::Pad::Type::SINGLE:
-			generateSingle(s, footprint.position, pad, clips);
+			writeSingle(s, footprint.position, pad, clips);
 			break;
 		case Footprint::Pad::Type::DUAL:
-			generateDual(s, footprint.position, pad, clips);
+			writeDual(s, footprint.position, pad, clips);
 			break;
 		case Footprint::Pad::Type::QUAD:
-			generateQuad(s, footprint.position, pad, clips);
+			writeQuad(s, footprint.position, pad, clips);
 			break;
-		case Footprint::Pad::Type::MATRIX:
-			generateMatrix(s, footprint.position, pad, clips);
+		case Footprint::Pad::Type::GRID:
+			writeGrid(s, footprint.position, pad, clips);
 			break;
 		}
+	}
+
+	// lines
+	for (auto &line : footprint.lines) {
+		writeLine(s, footprint.position, line);
 	}
 
 	// silkscreen
@@ -719,7 +905,7 @@ bool generateFootprint(const fs::path &path, const std::string &name, const Foot
 		clipper2::Paths64 dummy;
 		clipper2::Paths64 result;
 		clipper.Execute(clipper2::ClipType::Difference, clipper2::FillRule::NonZero, dummy, result);
-		silkscreenPaths(s, result);
+		writeSilkscreenPaths(s, result);
 	}
 
 	// footer
@@ -731,11 +917,16 @@ bool generateFootprint(const fs::path &path, const std::string &name, const Foot
 	return haveBody;
 }
 
+// generate a box as vrml as minimalistic 3D visualization
 void generateVrml(const fs::path &path, const std::string &name, const Footprint &footprint) {
 	std::ofstream s((path / (name + ".wrl")).string());
 
-	double3 center(0, 0, footprint.body.z * (0.5 / 2.54));
-	double3 size = footprint.body * (0.5 / 2.54);
+	// center of box
+	double3 center = footprint.offset + double3(footprint.position.x, footprint.position.y, 0);
+	center.y = -center.y;
+
+	// size of box
+	double3 size = footprint.body;
 
 	// header
 	s << R"vrml(#VRML V2.0 utf8
@@ -759,7 +950,7 @@ Shape {
 	for (int i = 0; i < 8; ++i) {
 		if (i != 0)
 			s << ',';
-		double3 p = center + size * double3(i & 1 ? 1.0 : -1.0, i & 2 ? 1.0 : -1.0, i & 4 ? 1.0 : -1.0);
+		double3 p = (center + size * double3(i & 1 ? 0.5 : -0.5, i & 2 ? 0.5 : -0.5, i & 4 ? 1.0 : 0.0)) / 2.54;
 		s << p;
 	}
 

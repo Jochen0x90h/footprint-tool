@@ -18,12 +18,24 @@ inline double2 operator -(double2 a) {
 	return {-a.x, -a.y};
 }
 
-inline double2 operator -(double2 a, double2 b) {
-	return {a.x - b.x, a.y - b.y};
+inline double2 &operator +=(double2 &a, double2 b) {
+	a.x += b.x;
+	a.y += b.y;
+	return a;
 }
 
 inline double2 operator +(double2 a, double2 b) {
 	return {a.x + b.x, a.y + b.y};
+}
+
+inline double2 &operator -=(double2 &a, double2 b) {
+	a.x -= b.x;
+	a.y -= b.y;
+	return a;
+}
+
+inline double2 operator -(double2 a, double2 b) {
+	return {a.x - b.x, a.y - b.y};
 }
 
 inline double2 operator *(double2 a, double b) {

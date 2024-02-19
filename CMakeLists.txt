@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.25)
 
 # set project
-project(footprinttool)
+project(footprint-tool)
 
 # configure languages
 enable_language(CXX)

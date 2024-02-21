@@ -27,20 +27,17 @@ struct Footprint {
 		SMD,
 	};
 
-	enum class Numbering {
-		CIRCULAR,
-		ZIGZAG,
-		DOUBLE
-	};
-
 	// pad or pad array
 	struct Pad {
 		enum class Type {
 			// single line of pads
 			SINGLE,
 
-			// dual pad lines
+			// dual pad lines (circular numbering)
 			DUAL,
+
+			// zigzag pad lines
+			ZIGZAG,
 
 			// quad pad lines (square or rectangular)
 			QUAD,
@@ -92,8 +89,8 @@ struct Footprint {
 		// mirror pads (pin 1 right instead of left)
 		bool mirror = false;
 
-		// numbering scheme
-		Numbering numbering = Numbering::CIRCULAR;
+		// double numbering
+		bool double_ = false;
 
 		// number of first pad
 		int number = 1;
@@ -257,6 +254,8 @@ void readPad(json &j, Footprint::Pad &pad) {
 	std::string type = j.value("type", std::string());
 	if (type == "dual")
 		pad.type = Footprint::Pad::Type::DUAL;
+	else if (type == "zigzag")
+		pad.type = Footprint::Pad::Type::ZIGZAG;
 	else if (type == "quad")
 		pad.type = Footprint::Pad::Type::QUAD;
 	else if (type == "grid")
@@ -276,14 +275,8 @@ void readPad(json &j, Footprint::Pad &pad) {
 	// mirror
 	read(j, "mirror", pad.mirror);
 
-	// numbering
-	std::string numbering = j.value("numbering", std::string());
-	if (numbering == "circular")
-		pad.numbering = Footprint::Numbering::CIRCULAR;
-	else if (numbering == "zigzag")
-		pad.numbering = Footprint::Numbering::ZIGZAG;
-	else if (numbering == "double")
-		pad.numbering = Footprint::Numbering::DOUBLE;
+	// double
+	read(j, "double", pad.double_);
 
 	// first pad number
 	read(j, "number", pad.number);
@@ -297,15 +290,6 @@ void readPad(json &j, Footprint::Pad &pad) {
 			pad.names.push_back(name.get<std::string>());
 		}
 	}
-
-	/*
-	// exclude numbers
-	if (j.contains("exclude")) {
-		for (auto number : j.at("exclude")) {
-			pad.exclude.insert(number.get<int>());
-		}
-	}*/
-
 }
 
 void readLine(json &j, Footprint::Line &line) {
@@ -478,6 +462,7 @@ void writeLine(std::ostream &s, double2 p1, double2 p2, double width, std::strin
 	s << "  (fp_line (start " << p1 << ") (end " << p2 << ") (width " << width << ") (layer " << layer << "))" << std::endl;
 }
 
+// write line consisting of multiple segments
 void writeLine(std::ostream &s, double2 position, const Footprint::Line &line) {
 	int segmentCount = line.points.size() - 1;
 	for (int i = 0; i < segmentCount; ++i) {
@@ -492,23 +477,6 @@ void writeLine(std::ostream &s, double2 position, const Footprint::Line &line) {
 			")" << std::endl;
 	}
 }
-/*
-void writePolygon(std::ostream &s, const std::vector<double2> &points, double width, std::string_view layer) {
-	s << "  (fp_poly " << std::endl;
-	s << "    (pts" << std::endl;
-
-	int segmentCount = points.size() - 1;
-	for (int i = 0; i < segmentCount; ++i) {
-		auto p = points[i];
-		s << "      (xy " << p << ')' << std::endl;
-	}
-
-	s << "    ) "
-		"(layer \"" << layer << "\") "
-		"(width " << width << ") "
-		"(fill solid) "
-		")" << std::endl;
-}*/
 
 // draw a rectangle to courtyard layer
 void writeRectangle(std::ostream &s, double2 center, double2 size, double width, const char *layer) {
@@ -654,22 +622,16 @@ void writeSingle(std::ofstream &s, double2 globalPosition, const Footprint::Pad 
 
 	// generate pins
 	for (int i = 0; i < count; ++i) {
-		//int number = pad.number + (pad.mirror ? count - 1 - i : i);
 		int index = pad.mirror ? count - 1 - i : i;
 
 		int n;
-		switch (pad.numbering) {
-		case Footprint::Numbering::CIRCULAR:
-		case Footprint::Numbering::ZIGZAG:
-			n = index;//pad.number + index * pad.increment;
-			break;
-		case Footprint::Numbering::DOUBLE:
-			n = index / 2;//pad.number + (index / 2) * pad.increment;
-			break;
+		if (!pad.double_) {
+			n = index;
+		} else {
+			// double pins
+			n = index / 2;
 		}
 
-
-		//if (pad.hasNumber(n)) {
 		if (pad.exists(n)) {
 			writePad(s, pad.getName(n), position, pad.size, pad.shape, pad.drillSize, padOffset, pad.clearance, pad.maskMargin, pad.back);
 			addSilkscreenPad(clips, position, pad.size, pad.drillSize);
@@ -710,19 +672,20 @@ void writeDual(std::ofstream &s, double2 globalPosition, const Footprint::Pad &p
 		int index = pad.mirror ? count - 1 - i : i;
 
 		int n1, n2;
-		switch (pad.numbering) {
-		case Footprint::Numbering::CIRCULAR:
+		if (pad.type == Footprint::Pad::Type::DUAL) {
+			// circular numbering
 			n1 = index;
 			n2 = pad.count - 1 - index;
-			break;
-		case Footprint::Numbering::ZIGZAG:
-			n1 = index * 2;
-			n2 = index * 2 + 1;
-			break;
-		case Footprint::Numbering::DOUBLE:
-			n1 = index;
-			n2 = n1;
-			break;
+		} else {
+			// zigzag numbering
+			if (!pad.double_) {
+				n1 = index * 2;
+				n2 = index * 2 + 1;
+			} else {
+				// double pins
+				n1 = index;
+				n2 = n1;
+			}
 		}
 
 		// first row
@@ -881,6 +844,7 @@ bool generateFootprint(const fs::path &path, const std::string &name, const Foot
 			writeSingle(s, footprint.position, pad, clips);
 			break;
 		case Footprint::Pad::Type::DUAL:
+		case Footprint::Pad::Type::ZIGZAG:
 			writeDual(s, footprint.position, pad, clips);
 			break;
 		case Footprint::Pad::Type::QUAD:

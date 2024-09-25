@@ -36,14 +36,25 @@ struct Footprint {
 			// dual pad lines (circular numbering)
 			DUAL,
 
-			// zigzag pad lines
-			ZIGZAG,
+			// dual pad lines with zigzag numbering
+			//ZIGZAG,
 
 			// quad pad lines (square or rectangular)
 			QUAD,
 
 			// matrix of pads
 			GRID
+		};
+
+		enum class Numbering {
+			// number circular (counter clock wise)
+			CIRCULAR,
+
+			// number column-wise
+			COLUMNS,
+
+			// number row-wise
+			ROWS,
 		};
 
 		// global position of pad or center of multiple pads
@@ -88,6 +99,9 @@ struct Footprint {
 
 		// mirror pads (pin 1 right instead of left)
 		bool mirror = false;
+
+		// numbering scheme
+		Numbering numbering = Numbering::CIRCULAR;
 
 		// double numbering
 		bool double_ = false;
@@ -254,14 +268,10 @@ void readPad(json &j, Footprint::Pad &pad) {
 	std::string type = j.value("type", std::string());
 	if (type == "dual")
 		pad.type = Footprint::Pad::Type::DUAL;
-	else if (type == "zigzag")
-		pad.type = Footprint::Pad::Type::ZIGZAG;
 	else if (type == "quad")
 		pad.type = Footprint::Pad::Type::QUAD;
 	else if (type == "grid")
 		pad.type = Footprint::Pad::Type::GRID;
-	else
-		pad.type = Footprint::Pad::Type::SINGLE;
 
 	// pitch
 	read(j, "pitch", pad.pitch);
@@ -274,6 +284,13 @@ void readPad(json &j, Footprint::Pad &pad) {
 
 	// mirror
 	read(j, "mirror", pad.mirror);
+
+	// numbering
+	std::string numbering = j.value("numbering", std::string());
+	if (numbering == "columns")
+		pad.numbering = Footprint::Pad::Numbering::COLUMNS;
+	else if (numbering == "rows")
+		pad.numbering = Footprint::Pad::Numbering::ROWS;
 
 	// double
 	read(j, "double", pad.double_);
@@ -378,10 +395,13 @@ void readFootprint(json &j, std::map<std::string, Footprint> &footprints, Footpr
 
 void readJson(const fs::path &path, std::map<std::string, Footprint> &footprints) {
 	// read config
-	std::ifstream is(path.string());
-	if (is.is_open()) {
+	std::ifstream s(path.string());
+	if (s.is_open()) {
 		try {
-			json j = json::parse(is);
+			json j = json::parse(s,
+				nullptr, // callback
+				true, // allow exceptions
+				true); // ignore comments
 
 			for (auto& [name, value] : j.items()) {
 				Footprint footprint;
@@ -624,12 +644,10 @@ void writeSingle(std::ofstream &s, double2 globalPosition, const Footprint::Pad 
 	for (int i = 0; i < count; ++i) {
 		int index = pad.mirror ? count - 1 - i : i;
 
-		int n;
-		if (!pad.double_) {
-			n = index;
-		} else {
+		int n = index;
+		if (pad.double_) {
 			// double pins
-			n = index / 2;
+			n /= 2;
 		}
 
 		if (pad.exists(n)) {
@@ -672,20 +690,23 @@ void writeDual(std::ofstream &s, double2 globalPosition, const Footprint::Pad &p
 		int index = pad.mirror ? count - 1 - i : i;
 
 		int n1, n2;
-		if (pad.type == Footprint::Pad::Type::DUAL) {
+		if (pad.numbering == Footprint::Pad::Numbering::CIRCULAR) {
 			// circular numbering
 			n1 = index;
 			n2 = pad.count - 1 - index;
+		} else if (pad.numbering == Footprint::Pad::Numbering::COLUMNS) {
+			// number by columns (zigzag)
+			n1 = index * 2;
+			n2 = index * 2 + 1;
 		} else {
-			// zigzag numbering
-			if (!pad.double_) {
-				n1 = index * 2;
-				n2 = index * 2 + 1;
-			} else {
-				// double pins
-				n1 = index;
-				n2 = n1;
-			}
+			// number by rows
+			n1 = index;
+			n2 = pad.count / 2 + index;
+		}
+		if (pad.double_) {
+			// double pins
+			n1 /= 2;
+			n2 /= 2;
 		}
 
 		// first row
@@ -819,21 +840,23 @@ bool generateFootprint(const fs::path &path, const std::string &name, const Foot
 	// body
 	if (haveBody) {
 		double2 position = footprint.position + footprint.offset.xy();
-		double2 size = bodySize + footprint.margin * 2.0;
+		double2 silkscreenSize = bodySize + footprint.margin * 2.0;
 
 		// apply mirror to size so that pin1 marker is placed at the rigt position
-		if (!footprint.pads.empty() && footprint.pads.front().mirror)
-			size.x *= -1;
+		if (!footprint.pads.empty() && footprint.pads.front().mirror) {
+			bodySize.x *= -1;
+			silkscreenSize.x *= -1;
+		}
 
 		// courtyard
-		writeRectangle(s, position, size, 0.05, "F.CrtYd");
+		writeRectangle(s, position, bodySize, 0.05, "F.CrtYd");
 
 		// fabrication layer
-		writeFabRectangle(s, position, size);
+		writeFabRectangle(s, position, bodySize);
 
 		// add silkscreen rectangle
 		if (footprint.silkscreen) {
-			addSilkscreenRectangle(clipper, position, size);
+			addSilkscreenRectangle(clipper, position, silkscreenSize);
 		}
 	}
 
@@ -844,7 +867,6 @@ bool generateFootprint(const fs::path &path, const std::string &name, const Foot
 			writeSingle(s, footprint.position, pad, clips);
 			break;
 		case Footprint::Pad::Type::DUAL:
-		case Footprint::Pad::Type::ZIGZAG:
 			writeDual(s, footprint.position, pad, clips);
 			break;
 		case Footprint::Pad::Type::QUAD:

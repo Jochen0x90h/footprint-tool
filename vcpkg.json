@@ -1,6 +1,6 @@
 {
-  "dependencies": [
-    "nlohmann-json",
-    "clipper2"
-  ]
+    "dependencies": [
+        "nlohmann-json",
+        "clipper2"
+    ]
 }

@@ -27,6 +27,17 @@ struct Footprint {
         SMD,
     };
 
+    enum class Orientation {
+        // pin 1 marker is at botton-left position
+        BOTTOM_LEFT,
+
+        // pin 1 marker is at top-left position
+        TOP_LEFT,
+
+        // pin 1 marker is at bottom-right position
+        BOTTOM_RIGHT,
+    };
+
     // pad or pad array
     struct Pad {
         enum class Type {
@@ -57,6 +68,9 @@ struct Footprint {
             ROWS,
         };
 
+        // package type for generating multiple pads
+        Type type = Type::SINGLE;
+
         // global position of pad or center of multiple pads
         double2 position;
 
@@ -85,8 +99,7 @@ struct Footprint {
         bool back = false;
 
 
-        // package type for generating multiple pads
-        Type type = Type::SINGLE;
+        bool vertical = false;
 
         // pitch between pads
         double pitch = 0;
@@ -158,11 +171,22 @@ struct Footprint {
     // body size, used for silkscreen, courtyard and 3D model
     double3 body;
 
-    // additional courtyard margin
-    double2 margin;
+    Orientation orientation = Orientation::BOTTOM_LEFT;
+
+    // additional silkscreen margin (positive makes silkscreen larger)
+    //double2 margin;
 
     // generate silkscreen
     bool silkscreen = true;
+
+    // silkscreen size is body size plus silkscreenAdd
+    double2 silkscreenAdd;
+
+    // generate courtyard
+    bool courtyard = true;
+
+    // courtyard size is body size plus courtyardAdd
+    double2 courtyardAdd;
 
     // global position
     double2 position;
@@ -244,6 +268,15 @@ void read(json &j, const std::string &key, double3 &value) {
 
 
 void readPad(json &j, Footprint::Pad &pad) {
+    // type
+    std::string type = j.value("type", std::string());
+    if (type == "dual")
+        pad.type = Footprint::Pad::Type::DUAL;
+    else if (type == "quad")
+        pad.type = Footprint::Pad::Type::QUAD;
+    else if (type == "grid")
+        pad.type = Footprint::Pad::Type::GRID;
+
     // position
     read(j, "position", pad.position);
 
@@ -270,16 +303,6 @@ void readPad(json &j, Footprint::Pad &pad) {
 
     // back side
     read(j, "back", pad.back);
-
-
-    // type
-    std::string type = j.value("type", std::string());
-    if (type == "dual")
-        pad.type = Footprint::Pad::Type::DUAL;
-    else if (type == "quad")
-        pad.type = Footprint::Pad::Type::QUAD;
-    else if (type == "grid")
-        pad.type = Footprint::Pad::Type::GRID;
 
     // pitch
     read(j, "pitch", pad.pitch);
@@ -371,10 +394,20 @@ void readFootprint(json &j, std::map<std::string, Footprint> &footprints, Footpr
     // body
     read(j, "body", footprint.body);
 
-    // margin (enlarges silkscreen around body)
-    readRelaxed(j, "margin", footprint.margin);
+    // orientation (position of pin 1 marker)
+    std::string orientation = j.value("orientation", std::string());
+    if (orientation == "top-left")
+        footprint.orientation = Footprint::Orientation::TOP_LEFT;
+    else if (orientation == "bottom-right")
+        footprint.orientation = Footprint::Orientation::BOTTOM_RIGHT;
 
+    // silkscreen
     read(j, "silkscreen", footprint.silkscreen);
+    readRelaxed(j, "silkscreenAdd", footprint.silkscreenAdd);
+
+    // courtyard
+    read(j, "courtyard", footprint.courtyard);
+    readRelaxed(j, "courtyardAdd", footprint.courtyardAdd);
 
     // global position
     read(j, "position", footprint.position);
@@ -511,7 +544,11 @@ void writePad(std::ostream &s, std::string_view name, double2 position, double2 
 
     // layers
     const char *layers = hasDrill ? "*.Cu *.Mask" : (back ? "B.Cu B.Mask B.Paste" : "F.Cu F.Mask F.Paste");
-    s << " (layers " << layers << "))" << std::endl;
+    s << " (layers " << layers << ")";
+    if (hasPad && hasDrill)
+        s << " (remove_unused_layers) (keep_end_layers)";
+
+    s << ')' << std::endl;
 }
 
 void writeLine(std::ostream &s, double2 p1, double2 p2, double width, std::string_view layer) {
@@ -572,7 +609,7 @@ constexpr double silkscreenWidth = 0.15;
 constexpr double silkscreenDistance = 0.1;
 constexpr double padClearance = 0.1;
 
-void addSilkscreenRectangle(clipper2::Clipper64 &clipper, double2 center, double2 size) {
+void addSilkscreenRectangle(clipper2::Clipper64 &clipper, double2 center, double2 size, Footprint::Orientation orientation) {
     //size.x += silkscreenWidth + silkscreenDistance * 2;
     //size.y += silkscreenWidth + silkscreenDistance * 2;
     double x1 = center.x - size.x * 0.5;
@@ -581,31 +618,72 @@ void addSilkscreenRectangle(clipper2::Clipper64 &clipper, double2 center, double
     double y2 = center.y - size.y * 0.5;
 
     double d = 4 * silkscreenWidth;
-    double x = x1 + (x2 > x1 ? d : -d);
-    double y = y1 + (y2 > y1 ? d : -d);
+    double xRef = 0;
+    double yRef = 0;
+    if (orientation == Footprint::Orientation::BOTTOM_LEFT) {
+        double x = x1 + (x2 > x1 ? d : -d);
+        double y = y1 + (y2 > y1 ? d : -d);
 
-    clipper2::Paths64 paths;
-    {
-        clipper2::Path64 &path = paths.emplace_back();
-        path.push_back(toClipperPoint({x, y1}));
-        path.push_back(toClipperPoint({x2, y1}));
-        path.push_back(toClipperPoint({x2, y2}));
-        path.push_back(toClipperPoint({x1, y2}));
-        path.push_back(toClipperPoint({x1, y}));
+        {
+            clipper2::Paths64 paths;
+            clipper2::Path64 &path = paths.emplace_back();
+            path.push_back(toClipperPoint({x, y1}));
+            path.push_back(toClipperPoint({x2, y1}));
+            path.push_back(toClipperPoint({x2, y2}));
+            path.push_back(toClipperPoint({x1, y2}));
+            path.push_back(toClipperPoint({x1, y}));
+            clipper.AddOpenSubject(paths);
+        }
+
+        xRef = x1;
+        yRef = y1;
+    } else if (orientation == Footprint::Orientation::TOP_LEFT) {
+        double x = x1 + (x2 > x1 ? d : -d);
+        double y = y2 + (y2 > y1 ? -d : d);
+
+        {
+            clipper2::Paths64 paths;
+            clipper2::Path64 &path = paths.emplace_back();
+            path.push_back(toClipperPoint({x1, y}));
+            path.push_back(toClipperPoint({x1, y1}));
+            path.push_back(toClipperPoint({x2, y1}));
+            path.push_back(toClipperPoint({x2, y2}));
+            path.push_back(toClipperPoint({x, y2}));
+            clipper.AddOpenSubject(paths);
+        }
+
+        xRef = x1;
+        yRef = y2;
+    } else if (orientation == Footprint::Orientation::BOTTOM_RIGHT) {
+        double x = x2 + (x2 > x1 ? -d : d);
+        double y = y1 + (y2 > y1 ? d : -d);
+
+        {
+            clipper2::Paths64 paths;
+            clipper2::Path64 &path = paths.emplace_back();
+            path.push_back(toClipperPoint({x2, y}));
+            path.push_back(toClipperPoint({x2, y2}));
+            path.push_back(toClipperPoint({x1, y2}));
+            path.push_back(toClipperPoint({x1, y1}));
+            path.push_back(toClipperPoint({x, y1}));
+            clipper.AddOpenSubject(paths);
+        }
+
+        xRef = x2;
+        yRef = y1;
     }
 
     // add pin1 indicator
     {
+        clipper2::Paths64 paths;
         clipper2::Path64 &path = paths.emplace_back();
         double w = silkscreenWidth * 0.5;
-        path.push_back(toClipperPoint({x1 - w, y1 - w}));
-        path.push_back(toClipperPoint({x1 + w, y1 - w}));
-        path.push_back(toClipperPoint({x1 + w, y1 + w}));
-        path.push_back(toClipperPoint({x1 - w, y1 + w}));
-        path.push_back(path.front()); // close square becaue it is treated as open path
+        path.push_back(toClipperPoint({xRef - w, yRef - w}));
+        path.push_back(toClipperPoint({xRef + w, yRef - w}));
+        path.push_back(toClipperPoint({xRef + w, yRef + w}));
+        path.push_back(toClipperPoint({xRef - w, yRef + w}));
+        clipper.AddSubject(paths);
     }
-
-    clipper.AddOpenSubject(paths);
 }
 
 inline void addSilkscreenPad(clipper2::Paths64 &paths, double2 center, double2 size, double2 drill) {
@@ -648,10 +726,10 @@ void silkscreenRectangle(std::ofstream &s, double2 center, double2 size) {
     line(s, {x1, y2}, {x1, y}, silkscreenWidth, "F.SilkS");
 }*/
 
-void writeSilkscreenPaths(std::ostream &s, const clipper2::Paths64 &paths) {
+void writeSilkscreenPaths(std::ostream &s, const clipper2::Paths64 &paths, int open = 0) {
     for (auto &path : paths) {
         int count = path.size();
-        for (int i = 0; i < count - 1; ++i) {
+        for (int i = 0; i < count - open; ++i) {
             auto p1 = toPoint(path[i]);
             auto p2 = toPoint(path[(i + 1) % count]);
             writeLine(s, p1, p2, silkscreenWidth, "F.SilkS");
@@ -679,17 +757,36 @@ void writeFabRectangle(std::ofstream &s, double2 center, double2 size) {
     writeLine(s, {x1, y2}, {x1, y}, silkscreenWidth, "F.Fab");
 }
 
-void writeSingle(std::ofstream &s, double2 globalPosition, const Footprint::Pad &pad, clipper2::Paths64 &clips) {
+void writeSingle(std::ofstream &s, const Footprint &footprint, const Footprint::Pad &pad, clipper2::Paths64 &clips) {
     int count = pad.count;
     bool hasPad = pad.size.positive();
     bool hasDrill = pad.drillSize.positive();
 
     // position of first pin
-    double2 position = globalPosition + pad.position + double2((pad.pitch * (count - 1)) * -0.5, 0);
+    double2 position = footprint.position + pad.position;// + double2((pad.pitch * (count - 1)) * -0.5, 0);
+
+    // pitch
+    double2 pitch = {0, 0};
 
     // offset of pad relative to drill
     double2 padOffset = {0, 0};
 
+    // adjust position/pitch depending on orientation
+    if (footprint.orientation == Footprint::Orientation::BOTTOM_LEFT) {
+        // pin 1 marker is bottom left
+        position += double2((pad.pitch * (count - 1)) * -0.5, 0);
+        pitch.x = pad.pitch;
+    } else if (footprint.orientation == Footprint::Orientation::TOP_LEFT) {
+        // pin 1 marker is top left
+        position += double2(0, (pad.pitch * (count - 1)) * -0.5);
+        pitch.y = pad.pitch;
+    } else {
+        // pin 1 marker is bottom right
+        position += double2(0, (pad.pitch * (count - 1)) * 0.5);
+        pitch.y = -pad.pitch;
+    }
+
+    // adjust position/offset depending on drill
     if (!hasDrill) {
         position += pad.offset;
     } else {
@@ -712,11 +809,13 @@ void writeSingle(std::ofstream &s, double2 globalPosition, const Footprint::Pad 
             writePad(s, pad.getName(n), position, pad.size, pad.shape, pad.drillSize, padOffset, pad.clearance, pad.maskMargin, pad.back);
             addSilkscreenPad(clips, position, pad.size, pad.drillSize);
         }
-        position.x += pad.pitch;
+        position += pitch;
     }
 }
 
-void writeDual(std::ofstream &s, double2 globalPosition, const Footprint::Pad &pad, clipper2::Paths64 &clips) {
+void writeDual(std::ofstream &s, const Footprint &footprint, const Footprint::Pad &pad,
+    clipper2::Paths64 &clips)
+{
     int count = pad.count / 2;
     bool hasPad = pad.size.positive();
     bool hasDrill = pad.drillSize.positive();
@@ -724,13 +823,35 @@ void writeDual(std::ofstream &s, double2 globalPosition, const Footprint::Pad &p
     double padDistance = pad.distance.x;
 
     // position of first pin in each row
-    double2 position1 = globalPosition + pad.position + double2((pad.pitch * (count - 1)) * -0.5, padDistance * 0.5);
-    double2 position2 = globalPosition + pad.position + double2((pad.pitch * (count - 1)) * -0.5, padDistance * -0.5);
+    double2 position1 = footprint.position + pad.position;
+    double2 position2 = footprint.position + pad.position;
+
+    // pitch
+    double2 pitch = {0, 0};
 
     // offset of pad relative to drill
     double2 padOffset1 = {0, 0};
     double2 padOffset2 = {0, 0};
 
+    // adjust position/pitch depending on orientation
+    if (footprint.orientation == Footprint::Orientation::BOTTOM_LEFT) {
+        // pin 1 marker is bottom left
+        position1 += double2((pad.pitch * (count - 1)) * -0.5, padDistance * 0.5);
+        position2 += double2((pad.pitch * (count - 1)) * -0.5, padDistance * -0.5);
+        pitch.x = pad.pitch;
+    } else if (footprint.orientation == Footprint::Orientation::TOP_LEFT) {
+        // pin 1 marker is top left
+        position1 += double2(padDistance * -0.5, (pad.pitch * (count - 1)) * -0.5);
+        position2 += double2(padDistance * 0.5, (pad.pitch * (count - 1)) * -0.5);
+        pitch.y = pad.pitch;
+    } else {
+        // pin 1 marker is bottom right
+        position1 += double2(padDistance * 0.5, (pad.pitch * (count - 1)) * 0.5);
+        position2 += double2(padDistance * -0.5, (pad.pitch * (count - 1)) * 0.5);
+        pitch.y = -pad.pitch;
+    }
+
+    // adjust position/offset depending on drill
     if (!hasDrill) {
         position1 += pad.offset;
         position2 -= pad.offset;
@@ -780,8 +901,8 @@ void writeDual(std::ofstream &s, double2 globalPosition, const Footprint::Pad &p
         }
 
         // increment position
-        position1.x += pad.pitch;
-        position2.x += pad.pitch;
+        position1 += pitch;
+        position2 += pitch;
     }
 }
 
@@ -872,12 +993,29 @@ void writeGrid(std::ofstream &s, double2 globalPosition, const Footprint::Pad &p
 }
 
 bool generateFootprint(const fs::path &path, const std::string &name, const Footprint &footprint) {
+    double2 position = footprint.position + footprint.offset.xy();
+
     auto bodySize =  footprint.body.xy();
     bool haveBody = bodySize.positive();
+
+    double2 silkscreenSize = bodySize + footprint.silkscreenAdd;
+    bool haveSilkscreen = footprint.silkscreen && silkscreenSize.positive();
+
+    double2 courtyardSize = bodySize + footprint.courtyardAdd;
+    bool haveCourtyard = footprint.courtyard && courtyardSize.positive();
+
     double2 refPosition = {0, 0};
     double2 valuePosition = {0, 0};
     double maskMargin = 0;
     double pasteMargin = 0;
+
+
+    // apply mirror to size so that pin1 marker is placed at the rigt position
+    if (!footprint.pads.empty() && footprint.pads.front().mirror) {
+        bodySize.x *= -1;
+        silkscreenSize.x *= -1;
+    }
+
 
     std::ofstream s((path / (name + ".kicad_mod")).string());
 
@@ -892,40 +1030,45 @@ bool generateFootprint(const fs::path &path, const std::string &name, const Foot
     s << "  (solder_mask_margin " << maskMargin << ")" << std::endl;
     s << "  (solder_paste_margin " << pasteMargin << ")" << std::endl;
 
+    // clipper for silkscreen
     clipper2::Clipper64 clipper;
-    clipper2::Paths64 clips;
+    clipper2::Paths64 clips; // shapes that clip away the silkscreen, e.g. pads
 
     // body
     if (haveBody) {
-        double2 position = footprint.position + footprint.offset.xy();
-        double2 silkscreenSize = bodySize + footprint.margin * 2.0;
+        //double2 silkscreenSize = bodySize + footprint.margin * 2.0;
 
         // apply mirror to size so that pin1 marker is placed at the rigt position
-        if (!footprint.pads.empty() && footprint.pads.front().mirror) {
-            bodySize.x *= -1;
-            silkscreenSize.x *= -1;
-        }
+        //if (!footprint.pads.empty() && footprint.pads.front().mirror) {
+        //    bodySize.x *= -1;
+        //    silkscreenSize.x *= -1;
+       // }
 
-        // courtyard
-        writeRectangle(s, position, bodySize, 0.05, "F.CrtYd");
 
         // fabrication layer
         writeFabRectangle(s, position, bodySize);
 
         // add silkscreen rectangle
-        if (footprint.silkscreen) {
-            addSilkscreenRectangle(clipper, position, silkscreenSize);
-        }
+        //if (footprint.silkscreen) {
+            //addSilkscreenRectangle(clipper, position, silkscreenSize);
+        //}
     }
+
+    if (haveSilkscreen)
+        addSilkscreenRectangle(clipper, position, silkscreenSize, footprint.orientation);
+
+    // courtyard
+    if (haveCourtyard)
+        writeRectangle(s, position, courtyardSize, 0.05, "F.CrtYd");
 
     // pads
     for (auto &pad : footprint.pads) {
         switch (pad.type) {
         case Footprint::Pad::Type::SINGLE:
-            writeSingle(s, footprint.position, pad, clips);
+            writeSingle(s, footprint, pad, clips);
             break;
         case Footprint::Pad::Type::DUAL:
-            writeDual(s, footprint.position, pad, clips);
+            writeDual(s, footprint, pad, clips);
             break;
         case Footprint::Pad::Type::QUAD:
             writeQuad(s, footprint.position, pad, clips);
@@ -947,14 +1090,15 @@ bool generateFootprint(const fs::path &path, const std::string &name, const Foot
     }
 
     // silkscreen
-    if (footprint.silkscreen && haveBody) {
+    if (haveSilkscreen) {
         clipper.AddClip(clips);
 
         // subtract pads from silkscreen
-        clipper2::Paths64 dummy;
-        clipper2::Paths64 result;
-        clipper.Execute(clipper2::ClipType::Difference, clipper2::FillRule::NonZero, dummy, result);
-        writeSilkscreenPaths(s, result);
+        clipper2::Paths64 closedPahts;
+        clipper2::Paths64 openPaths;
+        clipper.Execute(clipper2::ClipType::Difference, clipper2::FillRule::NonZero, closedPahts, openPaths);
+        writeSilkscreenPaths(s, closedPahts);
+        writeSilkscreenPaths(s, openPaths, 1);
     }
 
     // footer

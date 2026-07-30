@@ -7,5 +7,6 @@ Tool for generating footprints for KiCad from simple json files
 * Quat flat package (QFP)
 * Generates simple 3D model
 
-## Build
-Use [conan](support/conan/README.md) or [vcpkg](support/vcpkg/README.md).
+## Build/Develop
+
+Use [conan](README-conan.md)

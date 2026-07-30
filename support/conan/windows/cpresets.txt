@@ -1,3 +1,0 @@
-# profile config generator
-debug Debug "Visual Studio 17 2022"
-default Release "Visual Studio 17 2022"

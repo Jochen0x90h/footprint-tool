@@ -4,6 +4,7 @@
 #include "generateStep.hpp"
 #include "generateVrml.hpp"
 #include <nlohmann/json.hpp>
+#include <uuid.h>
 #include <iostream>
 #include <fstream>
 #include <filesystem>
@@ -163,6 +164,7 @@ void readPad(json &j, Footprint::Pad &pad) {
         for (auto name : j.at("names")) {
             pad.names.push_back(name.get<std::string>());
         }
+        pad.count = std::max(pad.count, int(pad.names.size()));
     }
 }
 
@@ -416,6 +418,31 @@ void readJson(const fs::path &path, std::map<std::string, Footprint> &footprints
     }
 }
 
+// Für bessere Performance und Thread-Sicherheit global einen Generator anlegen
+namespace uuids {
+    // Random-Generator (Version 4) – einmalig initialisiert
+    inline uuid_random_generator& get_uuid_generator() {
+        static uuid_random_generator generator = []() {
+            std::random_device rd;
+
+            // Gute Seed-Initialisierung (empfohlen von stduuid)
+            auto seed_data = std::array<int, std::mt19937::state_size>{};
+            std::generate(std::begin(seed_data), std::end(seed_data), std::ref(rd));
+
+            std::seed_seq seq(std::begin(seed_data), std::end(seed_data));
+            std::mt19937 engine(seq);
+
+            return uuid_random_generator{engine};   // oder &engine (siehe unten)
+        }();
+        return generator;
+    }
+}
+
+// Globale Funktion – einfach zu benutzen
+inline uuids::uuid generateUuid() {
+    return uuids::get_uuid_generator()();
+}
+
 // define a pad
 void writePad(std::ostream &s, std::string_view name, double2 position, double2 size, double2 offset, double shape,
     double2 drillSize, const Footprint::Pad &pad)
@@ -425,6 +452,7 @@ void writePad(std::ostream &s, std::string_view name, double2 position, double2 
 
     // pad
     if (hasPad) {
+        // through-hole or smd
         s << "  (pad \"" << name << "\" ";
         s << (hasDrill ? "thru_hole" : "smd");
     } else {
@@ -494,6 +522,10 @@ void writePad(std::ostream &s, std::string_view name, double2 position, double2 
     if (hasPad && hasDrill)
         s << " (remove_unused_layers) (keep_end_layers)";
 
+    // uuid
+    s << " (uuid \"" << generateUuid() << "\")";
+
+    // closing brace
     s << ')' << std::endl;
 }
 
@@ -504,6 +536,7 @@ void writeLine(std::ostream &s, double2 p1, double2 p2, double width, std::strin
         " (end " << p2 << ")"
         " (stroke (width " << width << ") (type solid))"
         " (layer " << layer << ")"
+        " (uuid \"" << generateUuid() << "\")"
         ")" << std::endl;
 }
 
@@ -514,12 +547,7 @@ void writeLine(std::ostream &s, double2 position, const Footprint::Line &line) {
         auto p1 = position + line.points[i];
         auto p2 = position + line.points[i + 1];
 
-        s << "  (fp_line"
-            " (start " << p1 << ")"
-            " (end " << p2 << ")"
-            " (stroke (width " << line.width << ") (type solid))"
-            " (layer \"" << line.layer << "\")"
-            ")" << std::endl;
+        writeLine(s, p1, p2, line.width, line.layer);
     }
 }
 
@@ -533,6 +561,7 @@ void writeRectangle(std::ostream &s, double2 position, const Footprint::Rectangl
         " (stroke (width " << rectangle.width << ") (type solid))"
         " (fill no)"
         " (layer \"" << rectangle.layer << "\")"
+        " (uuid \"" << generateUuid() << "\")"
         ")" << std::endl;
 }
 
@@ -546,6 +575,7 @@ void writeCircle(std::ostream &s, double2 position, const Footprint::Circle &cir
         " (stroke (width " << circle.width << ") (type default))"
         " (fill " << (circle.fill ? "solid" : "none") << ")"
         " (layer \"" << circle.layer << "\")"
+        " (uuid \"" << generateUuid() << "\")"
         ")" << std::endl;
 }
 
@@ -1018,9 +1048,6 @@ void writeGrid(std::ofstream &s, double2 globalPosition, const Footprint::Pad &p
 }
 
 bool generateFootprint(const fs::path &path, const std::string &name, const Footprint &footprint) {
-if (name == "Slider") {
-    int x= 0;
-}
     double2 position = footprint.position + footprint.body.offset.xy();
 
     double mirror = !footprint.pads.empty() && footprint.pads.front().mirror ? -1 : 1;
@@ -1047,10 +1074,43 @@ if (name == "Slider") {
     std::ofstream s((path / (name + ".kicad_mod")).string());
 
     // header
-    s << "(module " << name << " (layer F.Cu) (tedit 5EC043C1)" << std::endl;
+    //s << "(module " << name << " (layer F.Cu) (tedit 5EC043C1)" << std::endl;
+    s << "(footprint \"" << name << "\"" << std::endl;
+    s << "  (version 20260206)" << std::endl;
+    s << "  (generator \"pcbnew\")" << std::endl;
+	s << "  (generator_version \"10.0\")" << std::endl;
+	s << "  (layer \"F.Cu\")" << std::endl;
 
     // description
     s << "  (descr \"" << footprint.description << "\")" << std::endl;
+
+    // properties
+    s << "  (property \"Reference\" \"REF**\"" << std::endl;
+    s << "    (at 0 0 0)" << std::endl;
+    s << "    (layer \"F.SilkS\")" << std::endl;
+    s << "    (uuid \"" << generateUuid() << "\")" << std::endl;
+    s << "    (effects (font (size 1 1) (thickness 0.15)))" << std::endl;
+    s << "  )" << std::endl;
+    s << "  (property \"Value\" \"" << name << "\"" << std::endl;
+    s << "    (at 0 0 0)" << std::endl;
+    s << "    (layer \"F.Fab\")" << std::endl;
+    s << "    (uuid \"" << generateUuid() << "\")" << std::endl;
+    s << "    (effects (font (size 1 1) (thickness 0.15)))" << std::endl;
+    s << "  )" << std::endl;
+    s << "  (property \"Datasheet\" \"\"" << std::endl;
+    s << "    (at 0 0 0)" << std::endl;
+    s << "    (layer \"F.Fab\")" << std::endl;
+    s << "    (hide yes)" << std::endl;
+    s << "    (uuid \"" << generateUuid() << "\")" << std::endl;
+    s << "    (effects (font (size 1.27 1.27)))" << std::endl;
+    s << "  )" << std::endl;
+    s << "  (property \"Description\" \"\"" << std::endl;
+    s << "    (at 0 0 0)" << std::endl;
+    s << "    (layer \"F.Fab\")" << std::endl;
+    s << "    (hide yes)" << std::endl;
+    s << "    (uuid \"" << generateUuid() << "\")" << std::endl;
+    s << "    (effects (font (size 1.27 1.27)))" << std::endl;
+    s << "  )" << std::endl;
 
     // attributes
     s << "  (attr";
@@ -1062,16 +1122,13 @@ if (name == "Slider") {
     if (footprint.allowSolderMaskBridges)
         s << " allow_soldermask_bridges";
     s  << ')' << std::endl;
-
-    // 3D model
-    if (haveBody)
-        s << "  (model \"" << name << ".wrl\" (at (xyz 0 0 0)) (scale (xyz 1 1 1)) (rotate (xyz 0 0 0)))" << std::endl;
+    s << "  (duplicate_pad_numbers_are_jumpers no)" << std::endl;
 
     // reference
-    s << "  (fp_text reference REF** (at " << refPosition << ") (layer F.SilkS) (effects (font (size 1 1) (thickness 0.15))))" << std::endl;
+    //s << "  (fp_text reference REF** (at " << refPosition << ") (layer F.SilkS) (effects (font (size 1 1) (thickness 0.15))))" << std::endl;
 
     // value
-    s << "  (fp_text value " << name << " (at " << valuePosition << ") (layer F.Fab) (effects (font (size 1 1) (thickness 0.15))))" << std::endl;
+    //s << "  (fp_text value " << name << " (at " << valuePosition << ") (layer F.Fab) (effects (font (size 1 1) (thickness 0.15))))" << std::endl;
 
     // margins
     s << "  (solder_mask_margin " << maskMargin << ")" << std::endl;
@@ -1109,24 +1166,6 @@ if (name == "Slider") {
         writeFabRectangle(s, position + fabrication.offset, fabricationSize, footprint.orientation);
     }
 
-    // pads
-    for (auto &pad : footprint.pads) {
-        switch (pad.type) {
-        case Footprint::Pad::Type::SINGLE:
-            writeSingle(s, footprint, pad, clips);
-            break;
-        case Footprint::Pad::Type::DUAL:
-            writeDual(s, footprint, pad, clips);
-            break;
-        case Footprint::Pad::Type::QUAD:
-            writeQuad(s, footprint.position, pad, clips);
-            break;
-        case Footprint::Pad::Type::GRID:
-            writeGrid(s, footprint.position, pad, clips);
-            break;
-        }
-    }
-
     // lines
     for (auto &line : footprint.lines) {
         writeLine(s, footprint.position, line);
@@ -1151,6 +1190,32 @@ if (name == "Slider") {
         clipper.Execute(clipper2::ClipType::Difference, clipper2::FillRule::NonZero, closedPahts, openPaths);
         writeSilkscreenPaths(s, closedPahts);
         writeSilkscreenPaths(s, openPaths, 1);
+    }
+
+    // pads
+    for (auto &pad : footprint.pads) {
+        switch (pad.type) {
+        case Footprint::Pad::Type::SINGLE:
+            writeSingle(s, footprint, pad, clips);
+            break;
+        case Footprint::Pad::Type::DUAL:
+            writeDual(s, footprint, pad, clips);
+            break;
+        case Footprint::Pad::Type::QUAD:
+            writeQuad(s, footprint.position, pad, clips);
+            break;
+        case Footprint::Pad::Type::GRID:
+            writeGrid(s, footprint.position, pad, clips);
+            break;
+        }
+    }
+
+    s << "  (embedded_fonts no)" << std::endl;
+
+    // 3D model
+    if (haveBody) {
+        //s << "  (model \"" << name << ".wrl\" (offset (xyz 0 0 0)) (scale (xyz 1 1 1)) (rotate (xyz 0 0 0)))" << std::endl;
+        s << "  (model \"" << name << ".step\" (offset (xyz 0 0 0)) (scale (xyz 1 1 1)) (rotate (xyz 0 0 0)))" << std::endl;
     }
 
     // footer
@@ -1186,7 +1251,7 @@ int main(int argc, const char **argv) {
         std::cout << name << std::endl;
         auto dir = path.parent_path();
         if (generateFootprint(dir, name, footprint)) {
-            generateVrml(dir, name, footprint);
+            //generateVrml(dir, name, footprint);
             generateStep(dir, name, footprint);
         }
     }

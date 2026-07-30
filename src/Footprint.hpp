@@ -147,7 +147,7 @@ struct Footprint {
         // size of pad
         double2 size;
 
-        // offset of pad relative to position
+        // offset of pad (copper) relative to position
         double2 offset;
 
         // shape of pad

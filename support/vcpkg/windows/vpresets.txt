@@ -1,3 +1,0 @@
-# triplet config generator
-x64-windows-static Debug "Visual Studio 17 2022"
-x64-windows-static Release "Visual Studio 17 2022"

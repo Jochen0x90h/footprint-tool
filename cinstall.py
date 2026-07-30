@@ -7,7 +7,7 @@
 # 3: $ python cinstall.py
 #
 
-#import sys
+import platform
 import json
 from pathlib import Path
 import shlex
@@ -15,16 +15,18 @@ import subprocess
 
 
 # configuration
-installPrefix = str(Path.home() / ".local")
+install_prefix = str(Path.home() / ".local")
 
+# get system (Linux, Darwin, Windows)
+system = platform.system()
+#print(f"system {system}")
 
 # read presets from presets.txt
 file = open('cpresets.txt', 'r')
 presets = file.readlines()
 file.close()
 
-
-# structure for cmake presets
+# cmake presets
 cmakePresets = {
     "version": 3,
     "configurePresets": [],
@@ -41,49 +43,68 @@ def addPreset(type, name):
         }
     )
 
-# add a preset with config (Debug/Release) for multi-generators (e.g. Visual Studio)
-def addPresetWithConfig(type, name, config):
+def addPresetWithBuildType(type, name, build_type):
     cmakePresets[type].append(
         {
             "name": name,
             "configurePreset": name,
-            "configuration": config
+            "configuration": build_type
         }
     )
 
 # iterate over presets
 for preset in presets:
     p = shlex.split(preset)
-    if not preset.startswith('#') and len(p) == 3:
-        profile = p[0] # conan profile
-        config = p[1] # Debug/Release
-        generator = p[2]
-        name = profile
+    if preset.startswith('#') or len(p) < 2:
+       continue
 
-        # install dependencies using conan
-        print(f"*** Installing dependencies for {profile} ***")
-        subprocess.run(f"conan install -pr:b default -pr:h {profile} -b missing -of build/{name} .", shell=True)
+    # check optional system
+    if len(p) >= 3 and p[2] != system:
+       continue
 
-        # create cmake presets
-        cmakePresets["configurePresets"].append(
-            {
-                "name": name,
-                "description": f"({generator})",
-                "generator": generator,
-                "cacheVariables": {
-                    "CMAKE_BUILD_TYPE": config,
-                    "CMAKE_INSTALL_PREFIX": installPrefix
-                },
-                "toolchainFile": f"build/{name}/conan_toolchain.cmake",
-                "binaryDir": f"build/{name}"
-            }
-        )
-        if "Visual Studio" in generator:
-            addPresetWithConfig("buildPresets", name, config)
-            addPresetWithConfig("testPresets", name, config)
-        else:
-            addPreset("buildPresets", name)
-            addPreset("testPresets", name)
+    profile = p[0]
+    generator = p[1]
+
+    # get build_type (Debug/Release) from profile
+    result = subprocess.run(f"conan profile show -pr:h={profile} --format=json", shell=True, capture_output=True, check=True)
+    j = json.loads(result.stdout)
+    build_type = j.get("host", {}).get("settings", {}).get("build_type")
+    if build_type is None:
+        print(f"Warning: build type for profile {profile} not found")
+        continue
+
+    if build_type == 'Release':
+        name = system
+    else:
+        name = f"{system}-{build_type}"
+
+    # install dependencies using conan
+    print(f"*** Installing dependencies for profile {profile} ({build_type}) ***")
+    subprocess.run(f"conan install -pr:b default -pr:h {profile} -b missing -of build/{name} .", shell=True)
+
+    # create cmake presets
+    cmakePresets["configurePresets"].append(
+        {
+            "name": name,
+            "description": f"({generator})",
+            "generator": generator,
+            "cacheVariables": {
+                #"CMAKE_POLICY_DEFAULT_CMP0077": "NEW",
+                "CMAKE_POLICY_DEFAULT_CMP0091": "NEW",
+                "CMAKE_BUILD_TYPE": build_type,
+                "CMAKE_INSTALL_PREFIX": install_prefix
+            },
+            #"toolchainFile": str(os.getcwd() / f"build/{name}/conan_toolchain.cmake"),
+            "toolchainFile": f"build/{name}/conan_toolchain.cmake",
+            "binaryDir": f"build/{name}"
+        }
+    )
+    if "Visual Studio" in generator:
+        addPresetWithBuildType("buildPresets", name, build_type)
+        addPresetWithBuildType("testPresets", name, build_type)
+    else:
+        addPreset("buildPresets", name)
+        addPreset("testPresets", name)
 
 # save cmake presets to CMakeUserPresets.json
 file = open("CMakeUserPresets.json", "w")

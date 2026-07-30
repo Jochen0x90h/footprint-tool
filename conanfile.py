@@ -6,7 +6,7 @@ from conan.tools.cmake import CMake
 class Project(ConanFile):
     name = "footprint-tool"
     description = "Tool for generating footprints for KiCad"
-    url = "https://github.com/Jochen0x90h/FootprintTool"
+    url = "https://github.com/Jochen0x90h/footprint-tool"
     license = "MIT"
     settings = "os", "compiler", "build_type", "arch"
     default_options = {}
@@ -15,6 +15,7 @@ class Project(ConanFile):
     requires = [
         "nlohmann_json/3.12.0",
         "clipper2/1.5.3",
+        "stduuid/1.2.3",
         #"opencascade/7.9.1"
     ]
 

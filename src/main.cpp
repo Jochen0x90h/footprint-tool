@@ -4,16 +4,18 @@
 #include "generateStep.hpp"
 #include "generateVrml.hpp"
 #include <nlohmann/json.hpp>
-#include <uuid.h>
+//#include <uuid.h>
 #include <iostream>
 #include <fstream>
 #include <filesystem>
+#include <numbers>
 #include <set>
 
 
 #define VERSION "0.3.0"
 
 
+using namespace std::numbers;
 using json = nlohmann::json;
 namespace fs = std::filesystem;
 
@@ -186,6 +188,9 @@ void readLine(json &j, Footprint::Line &line) {
             line.points.emplace_back(x, y);
         }
     }
+
+    // joint radius
+    read(j, "radius", line.radius);
 }
 
 void readRectangle(json &j, Footprint::Rectangle &rectangle) {
@@ -200,6 +205,9 @@ void readRectangle(json &j, Footprint::Rectangle &rectangle) {
 
     // p2
     read(j, "p2", rectangle.p2);
+
+    // radius
+    read(j, "radius", rectangle.radius);
 }
 
 void readCircle(json &j, Footprint::Circle &circle) {
@@ -418,22 +426,23 @@ void readJson(const fs::path &path, std::map<std::string, Footprint> &footprints
     }
 }
 
-// Für bessere Performance und Thread-Sicherheit global einen Generator anlegen
+/*
+// UUIDs are optional for footprints, therefore omit
 namespace uuids {
-    // Random-Generator (Version 4) – einmalig initialisiert
     inline uuid_random_generator& get_uuid_generator() {
-        static uuid_random_generator generator = []() {
+        static std::mt19937 engine = []() {
+            // generate seed
             std::random_device rd;
-
-            // Gute Seed-Initialisierung (empfohlen von stduuid)
             auto seed_data = std::array<int, std::mt19937::state_size>{};
             std::generate(std::begin(seed_data), std::end(seed_data), std::ref(rd));
-
             std::seed_seq seq(std::begin(seed_data), std::end(seed_data));
-            std::mt19937 engine(seq);
 
-            return uuid_random_generator{engine};   // oder &engine (siehe unten)
+            // create engine
+            return std::mt19937{seq};
         }();
+
+        static uuid_random_generator generator{engine};
+
         return generator;
     }
 }
@@ -442,6 +451,7 @@ namespace uuids {
 inline uuids::uuid generateUuid() {
     return uuids::get_uuid_generator()();
 }
+*/
 
 // define a pad
 void writePad(std::ostream &s, std::string_view name, double2 position, double2 size, double2 offset, double shape,
@@ -523,7 +533,7 @@ void writePad(std::ostream &s, std::string_view name, double2 position, double2 
         s << " (remove_unused_layers) (keep_end_layers)";
 
     // uuid
-    s << " (uuid \"" << generateUuid() << "\")";
+    //s << " (uuid \"" << generateUuid() << "\")";
 
     // closing brace
     s << ')' << std::endl;
@@ -536,12 +546,12 @@ void writeLine(std::ostream &s, double2 p1, double2 p2, double width, std::strin
         " (end " << p2 << ")"
         " (stroke (width " << width << ") (type solid))"
         " (layer " << layer << ")"
-        " (uuid \"" << generateUuid() << "\")"
+        //" (uuid \"" << generateUuid() << "\")"
         ")" << std::endl;
 }
 
 // write line consisting of multiple segments
-void writeLine(std::ostream &s, double2 position, const Footprint::Line &line) {
+/*void writeLine(std::ostream &s, double2 position, const Footprint::Line &line) {
     int segmentCount = line.points.size() - 1;
     for (int i = 0; i < segmentCount; ++i) {
         auto p1 = position + line.points[i];
@@ -549,19 +559,94 @@ void writeLine(std::ostream &s, double2 position, const Footprint::Line &line) {
 
         writeLine(s, p1, p2, line.width, line.layer);
     }
+}*/
+
+void writeLine(std::ostream &s, double2 position, const Footprint::Line &line) {
+    int segmentCount = line.points.size() - 1;
+    if (line.radius <= 0) {
+        for (int i = 0; i < segmentCount; ++i) {
+            auto p1 = position + line.points[i];
+            auto p2 = position + line.points[i + 1];
+
+            writeLine(s, p1, p2, line.width, line.layer);
+        }
+    } else {
+        auto p1 = position + line.points[0];
+        auto p2 = position + line.points[1];
+        for (int i = 2; i <= segmentCount; ++i) {
+            auto p3 = position + line.points[i];
+
+
+            auto d1 = p2 - p1;
+            auto d2 = p3 - p2;
+
+            // unit directions
+            auto u1 = normalize(d1);
+            auto u2 = normalize(d2);
+
+            // unit normals
+            double2 n1 = {-u1.y, u1.x};
+            double2 n2 = {-u2.y, u2.x};
+
+            double cross = n1.x * n2.y - n1.y * n2.x;
+
+            double angle = pi - asin(cross);
+
+            // flip normals if winding direction is negative
+            if (cross < 0) {
+                n1 = -n1;
+                n2 = -n2;
+            }
+
+            // direction of circle center
+            auto d = normalize(n1 + n2);
+
+            // circle center
+            auto c = p2 + d * (line.radius / sin(angle * 0.5));
+
+            // segment angles
+            double a1 = atan2(-n1.y, -n1.x);
+            double a2 = atan2(-n2.y, -n2.x);
+            if (a2 - a1 > pi)
+                a2 -= 2 * pi;
+            if (a2 - a1 < -pi)
+                a2 += 2 * pi;
+
+            // number of circle steps
+            int count = int(abs(a2 - a1) * 30 / pi) + 1;
+
+            // write circle segment
+            double aStep = (a2 - a1) / count;
+            for (int i = 0; i <= count; ++i) {
+                double a = a1 + i * aStep;
+                auto p = c + double2{cos(a), sin(a)};
+
+                writeLine(s, p1, p, line.width, line.layer);
+                p1 = p;
+            }
+
+            // next
+            p2 = p3;
+        }
+        writeLine(s, p1, p2, line.width, line.layer);
+    }
 }
 
 // write rectangle
 void writeRectangle(std::ostream &s, double2 position, const Footprint::Rectangle &rectangle) {
-    auto p1 = position + rectangle.p1;
-    auto p2 = position + rectangle.p2;
+    auto x1 = position + rectangle.p1;
+    auto x2 = position + rectangle.p2;
+    auto p1 = min(x1, x2);
+    auto p2 = max(x1, x2);
     s << "  (fp_rect"
         " (start " << p1 << ")"
-        " (end " << p2 << ")"
-        " (stroke (width " << rectangle.width << ") (type solid))"
+        " (end " << p2 << ")";
+    if (rectangle.radius > 0)
+        s << " (radius " << rectangle.radius << ")";
+    s << " (stroke (width " << rectangle.width << ") (type solid))"
         " (fill no)"
         " (layer \"" << rectangle.layer << "\")"
-        " (uuid \"" << generateUuid() << "\")"
+        //" (uuid \"" << generateUuid() << "\")"
         ")" << std::endl;
 }
 
@@ -575,7 +660,7 @@ void writeCircle(std::ostream &s, double2 position, const Footprint::Circle &cir
         " (stroke (width " << circle.width << ") (type default))"
         " (fill " << (circle.fill ? "solid" : "none") << ")"
         " (layer \"" << circle.layer << "\")"
-        " (uuid \"" << generateUuid() << "\")"
+        //" (uuid \"" << generateUuid() << "\")"
         ")" << std::endl;
 }
 
@@ -853,7 +938,8 @@ void writeSingle(std::ofstream &s, const Footprint &footprint, const Footprint::
 void writeDual(std::ofstream &s, const Footprint &footprint, const Footprint::Pad &pad,
     clipper2::Paths64 &clips)
 {
-    int count = pad.count / 2;
+    int count1 = (pad.count + 1) / 2;
+    int count2 = pad.count / 2;
     bool hasPad = pad.size.positive();
     bool hasDrill = pad.drillSize.positive();
 
@@ -869,8 +955,8 @@ void writeDual(std::ofstream &s, const Footprint &footprint, const Footprint::Pa
     double2 padOffset1 = {0, 0};
     double2 padOffset2 = {0, 0};
 
-    double start1 = pad.pitch * (count - 1) * 0.5 + shift;
-    double start2 = pad.pitch * (count - 1) * 0.5 - shift;
+    double start1 = pad.pitch * (count1 - 1) * 0.5 + shift;
+    double start2 = pad.pitch * (count2 - 1) * 0.5 - shift;
 
     // calc position/pitch depending on orientation
     double2 position1 = position;
@@ -920,8 +1006,8 @@ void writeDual(std::ofstream &s, const Footprint &footprint, const Footprint::Pa
     }
 
     // generate pins
-    for (int i = 0; i < count; ++i) {
-        int index = pad.mirror ? count - 1 - i : i;
+    for (int i = 0; i < count1; ++i) {
+        int index = pad.mirror ? count1 - 1 - i : i;
 
         int n1, n2;
         if (pad.numbering == Footprint::Pad::Numbering::CIRCULAR) {
@@ -950,7 +1036,7 @@ void writeDual(std::ofstream &s, const Footprint &footprint, const Footprint::Pa
         }
 
         // second row
-        if (pad.exists(n2)) {
+        if (i < count2 && pad.exists(n2)) {
             writePad(s, pad.getName(n2), position2, pad.size, padOffset2, pad.shape, pad.drillSize, pad);
             addSilkscreenPad(clips, position2, pad.size, pad.drillSize);
         }
@@ -1074,7 +1160,6 @@ bool generateFootprint(const fs::path &path, const std::string &name, const Foot
     std::ofstream s((path / (name + ".kicad_mod")).string());
 
     // header
-    //s << "(module " << name << " (layer F.Cu) (tedit 5EC043C1)" << std::endl;
     s << "(footprint \"" << name << "\"" << std::endl;
     s << "  (version 20260206)" << std::endl;
     s << "  (generator \"pcbnew\")" << std::endl;
@@ -1088,27 +1173,27 @@ bool generateFootprint(const fs::path &path, const std::string &name, const Foot
     s << "  (property \"Reference\" \"REF**\"" << std::endl;
     s << "    (at 0 0 0)" << std::endl;
     s << "    (layer \"F.SilkS\")" << std::endl;
-    s << "    (uuid \"" << generateUuid() << "\")" << std::endl;
+    //s << "    (uuid \"" << generateUuid() << "\")" << std::endl;
     s << "    (effects (font (size 1 1) (thickness 0.15)))" << std::endl;
     s << "  )" << std::endl;
     s << "  (property \"Value\" \"" << name << "\"" << std::endl;
     s << "    (at 0 0 0)" << std::endl;
     s << "    (layer \"F.Fab\")" << std::endl;
-    s << "    (uuid \"" << generateUuid() << "\")" << std::endl;
+    //s << "    (uuid \"" << generateUuid() << "\")" << std::endl;
     s << "    (effects (font (size 1 1) (thickness 0.15)))" << std::endl;
     s << "  )" << std::endl;
     s << "  (property \"Datasheet\" \"\"" << std::endl;
     s << "    (at 0 0 0)" << std::endl;
     s << "    (layer \"F.Fab\")" << std::endl;
     s << "    (hide yes)" << std::endl;
-    s << "    (uuid \"" << generateUuid() << "\")" << std::endl;
+    //s << "    (uuid \"" << generateUuid() << "\")" << std::endl;
     s << "    (effects (font (size 1.27 1.27)))" << std::endl;
     s << "  )" << std::endl;
     s << "  (property \"Description\" \"\"" << std::endl;
     s << "    (at 0 0 0)" << std::endl;
     s << "    (layer \"F.Fab\")" << std::endl;
     s << "    (hide yes)" << std::endl;
-    s << "    (uuid \"" << generateUuid() << "\")" << std::endl;
+    //s << "    (uuid \"" << generateUuid() << "\")" << std::endl;
     s << "    (effects (font (size 1.27 1.27)))" << std::endl;
     s << "  )" << std::endl;
 
@@ -1123,12 +1208,6 @@ bool generateFootprint(const fs::path &path, const std::string &name, const Foot
         s << " allow_soldermask_bridges";
     s  << ')' << std::endl;
     s << "  (duplicate_pad_numbers_are_jumpers no)" << std::endl;
-
-    // reference
-    //s << "  (fp_text reference REF** (at " << refPosition << ") (layer F.SilkS) (effects (font (size 1 1) (thickness 0.15))))" << std::endl;
-
-    // value
-    //s << "  (fp_text value " << name << " (at " << valuePosition << ") (layer F.Fab) (effects (font (size 1 1) (thickness 0.15))))" << std::endl;
 
     // margins
     s << "  (solder_mask_margin " << maskMargin << ")" << std::endl;
@@ -1181,18 +1260,7 @@ bool generateFootprint(const fs::path &path, const std::string &name, const Foot
         writeCircle(s, footprint.position, circle);
     }
 
-    // silkscreen
-    if (haveSilkscreen) {
-        // subtract pads from silkscreen
-        clipper.AddClip(clips);
-        clipper2::Paths64 closedPahts;
-        clipper2::Paths64 openPaths;
-        clipper.Execute(clipper2::ClipType::Difference, clipper2::FillRule::NonZero, closedPahts, openPaths);
-        writeSilkscreenPaths(s, closedPahts);
-        writeSilkscreenPaths(s, openPaths, 1);
-    }
-
-    // pads
+    // pads (also clip away the silkscreen)
     for (auto &pad : footprint.pads) {
         switch (pad.type) {
         case Footprint::Pad::Type::SINGLE:
@@ -1208,6 +1276,17 @@ bool generateFootprint(const fs::path &path, const std::string &name, const Foot
             writeGrid(s, footprint.position, pad, clips);
             break;
         }
+    }
+
+    // silkscreen
+    if (haveSilkscreen) {
+        // subtract pads from silkscreen
+        clipper.AddClip(clips);
+        clipper2::Paths64 closedPahts;
+        clipper2::Paths64 openPaths;
+        clipper.Execute(clipper2::ClipType::Difference, clipper2::FillRule::NonZero, closedPahts, openPaths);
+        writeSilkscreenPaths(s, closedPahts);
+        writeSilkscreenPaths(s, openPaths, 1);
     }
 
     s << "  (embedded_fonts no)" << std::endl;

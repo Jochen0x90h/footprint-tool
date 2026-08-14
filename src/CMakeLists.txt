@@ -11,7 +11,7 @@ add_executable(${PROJECT_NAME}
 )
 target_link_libraries(${PROJECT_NAME}
     nlohmann_json::nlohmann_json
-    stduuid::stduuid
+    #stduuid::stduuid
     opencascade::opencascade
 )
 if(VCPKG_TARGET_TRIPLET)

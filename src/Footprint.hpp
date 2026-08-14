@@ -211,6 +211,7 @@ struct Footprint {
         std::string layer;
         double width = 0.1;
         std::vector<double2> points;
+        double radius = 0;
     };
 
     struct Rectangle {
@@ -218,6 +219,7 @@ struct Footprint {
         double width = 0.1;
         double2 p1;
         double2 p2;
+        double radius = 0;
     };
 
     struct Circle {

@@ -14,8 +14,8 @@ class Project(ConanFile):
     exports_sources = "conanfile.py", "CMakeLists.txt", "src/*"
     requires = [
         "nlohmann_json/3.12.0",
-        "clipper2/1.5.3",
-        "stduuid/1.2.3",
+        "clipper2/2.0.1",
+        #"stduuid/1.2.3",
         #"opencascade/7.9.1"
     ]
 

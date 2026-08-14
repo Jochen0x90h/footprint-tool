@@ -50,3 +50,20 @@ inline std::ostream &operator <<(std::ostream &s, double2 value) {
 	s << value.x << ' ' << value.y;
 	return s;
 }
+
+inline double2 min(double2 a, double2 b) {
+	return {std::min(a.x, b.x), std::min(a.y, b.y)};
+}
+
+inline double2 max(double2 a, double2 b) {
+	return {std::max(a.x, b.x), std::max(a.y, b.y)};
+}
+
+inline double length(double2 a) {
+	return sqrt(a.x * a.x + a.y * a.y);
+}
+
+inline double2 normalize(double2 a) {
+	double s = 1.0 / length(a);
+	return {a.x * s, a.y * s};
+}

@@ -22,7 +22,7 @@ else()
     # conan
     find_package(clipper2 CONFIG)
 endif()
-find_package(stduuid CONFIG)
+#find_package(stduuid CONFIG)
 find_package(opencascade CONFIG)
 
 # source

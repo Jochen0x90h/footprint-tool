@@ -1,4 +1,5 @@
 #include "generateStep.hpp"
+#include <APIHeaderSection_MakeHeader.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <STEPControl_Writer.hxx>
 #include <XSControl_WorkSession.hxx>
@@ -37,6 +38,10 @@ bool generateStep(const fs::path &path, const std::string &name, const Footprint
         std::cerr << "Error: Transfer of box to step writer failed!" << std::endl;
         return false;
     }
+
+    // set empty date/time
+    APIHeaderSection_MakeHeader header(writer.Model());
+    header.SetTimeStamp(new TCollection_HAsciiString(""));
 
     // write step file
     status = writer.Write((path / (name + ".step")).string().c_str());
